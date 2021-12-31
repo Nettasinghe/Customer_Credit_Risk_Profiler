@@ -1,0 +1,3917 @@
+
+#pragma warning(disable:4786)
+
+
+#include <oraca.h>
+//#include <sqlcpr.h>
+#include <sqlda.h>
+#include <sqlca.h>
+
+
+#ifndef ORA_PROC
+
+#include <stdio.h>
+#include <string.h>
+#include <fstream>
+#include <stdlib.h>
+#include "data_containers.h"
+
+#endif
+
+
+extern	churn	*gsm_churn;
+extern  profiled_data* profiled_data_block;
+
+
+#define FETCH_SIZE	5000
+#define BUF_LEN	100		
+
+
+EXEC SQL DECLARE CUSTOMER_CARE DATABASE; 
+EXEC SQL DECLARE RATING DATABASE; 
+
+EXEC SQL BEGIN DECLARE SECTION;
+char *login_cust_care;
+char *login_rating;
+EXEC SQL END DECLARE SECTION;
+
+
+void sql_error(char *msg)
+{
+	cout << endl << msg << endl;
+	sqlca.sqlerrm.sqlerrmc[sqlca.sqlerrm.sqlerrml] = '\0';
+	oraca.orastxt.orastxtc[oraca.orastxt.orastxtl] = '\0';
+	oraca.orasfnm.orasfnmc[oraca.orasfnm.orasfnml] = '\0';
+	cout << sqlca.sqlerrm.sqlerrmc << endl;
+	cout << "in " << oraca.orastxt.orastxtc << endl;
+	cout << "on line " << oraca.oraslnr << " of " << oraca.orasfnm.orasfnmc
+		<< endl << endl;
+	
+	//-- Roll back any pending changes and disconnect from Oracle.
+	//EXEC SQL ROLLBACK RELEASE;
+	exit(1);
+}
+
+void not_found_error(char *msg)
+{
+    cout << endl << msg << endl;
+   
+  //-- Roll back any pending changes and disconnect from Oracle.
+
+    EXEC SQL ROLLBACK RELEASE;
+    exit(1);
+}
+
+
+
+//-- Connect to ORACLE as customer care. 
+void db_connect_cust_care(char *in_login)
+{
+	login_cust_care = in_login;  // a pointer assignment, in_login has the space acclocation
+
+    EXEC SQL WHENEVER SQLERROR DO sql_error("ORACLE error--");
+
+	//ut<<"\nConnecting to ORACLE  as: "<<login_cust_care<<endl;
+ 	cout<<"\nConnecting to ORACLE  "<< endl;
+
+    EXEC SQL CONNECT :login_cust_care AT CUSTOMER_CARE;
+	EXEC SQL AT CUSTOMER_CARE ALTER SESSION SET NLS_DATE_FORMAT="YYYYMMDDHH24MISS"; 
+	cout<<"Connected  to Database"<<endl<<endl; 
+
+}
+
+
+//-- Connect to ORACLE as rating. 
+void db_connect_rating(char *in_login)
+{
+	login_rating = in_login;  // a pointer assignment, in_login has the space acclocation
+
+    EXEC SQL WHENEVER SQLERROR DO sql_error("ORACLE error--");
+
+	cout<<"\nConnecting to ORACLE  as: "<<login_rating<<endl;
+ 	cout<<"\nConnecting to ORACLE  "<< endl;
+
+    EXEC SQL CONNECT :login_rating AT RATING;
+	EXEC SQL AT RATING ALTER SESSION SET NLS_DATE_FORMAT="YYYYMMDDHH24MISS"; 
+	cout<<"Connected  to Database"<<endl<<endl; 
+
+}
+
+
+void db_disconnect_cust_care()
+{
+	cout<<"\nORACLE  customer care database: DISCONNECT"<<endl;
+	EXEC SQL AT CUSTOMER_CARE COMMIT WORK RELEASE; 
+}
+
+void db_disconnect_rating()
+{
+	cout<<"\nORACLE  rating database: DISCONNECT"<<endl;
+	EXEC SQL AT RATING COMMIT WORK RELEASE; 
+}
+
+
+void churn::get_db_sysdate()
+{
+	EXEC SQL BEGIN DECLARE SECTION;
+		
+		 char	br_system_date[20];	
+
+	EXEC SQL END DECLARE SECTION;
+
+	EXEC SQL WHENEVER NOT FOUND DO not_found_error("not_found_error in get_db_sysdate()"); 
+
+	EXEC SQL 
+	AT customer_care
+	SELECT	to_char(sysdate,'YYYYMMDD')
+	INTO	:br_system_date
+	FROM	DUAL;
+
+	sys_date	= br_system_date;
+	transition	= true;
+}
+
+void churn::get_db_last_bill_date()
+{
+	EXEC SQL BEGIN DECLARE SECTION;
+		
+		 char	br_last_bill_date[20];	
+
+	EXEC SQL END DECLARE SECTION;
+
+	EXEC SQL WHENEVER NOT FOUND DO transition_error("transition false");
+
+	EXEC SQL 
+	AT customer_care
+	SELECT END_DATE 
+		INTO : br_last_bill_date
+		FROM bill_run_detail
+	WHERE BR_STATUS = 'TRANSITION';
+
+	last_bill_date	= br_last_bill_date;
+}
+
+void churn::db_read_billenq_tab()
+{
+	EXEC SQL BEGIN DECLARE SECTION;
+
+	struct psi_t
+	{ 
+		char	row_id[BUF_LEN];
+		char	billenq_mob_num[BUF_LEN];		// varchar2(10)	- NN
+		char	billenq_acct_num[BUF_LEN];		// varchar2(10)	- NN
+		char	billenq_pin[BUF_LEN];			// varchar2(6)	- NN
+		char	billenq_current[BUF_LEN];		// varchar2(15)
+		char	billenq_outstand[BUF_LEN];		// varchar2(15)
+		char	billenq_last_update[BUF_LEN];	// varchar2(14)
+		char	billenq_last_billamt[BUF_LEN];	// varchar2(15)
+		char	billenq_last_billdate[BUF_LEN];	// varchar2(14)
+		char	billenq_last_payamt[BUF_LEN];	// varchar2(15)
+		char	billenq_last_paymode[BUF_LEN];	// varchar2(3)
+		char	billenq_last_paydate[BUF_LEN];	// varchar2(14)
+		char	billenq_lang[BUF_LEN];			// varchar2(1)
+		char	billenq_min_payment[BUF_LEN];	// varchar2(15)
+		char	billenq_con_type[BUF_LEN];		// varchar2(1)
+	} *a;
+
+	struct psi_ind
+	{
+		short	row_id_ind; 
+ 		short	billenq_mob_num_ind;
+		short	billenq_acct_num_ind;
+		short	billenq_pin_ind;
+		short	billenq_current_ind;
+		short	billenq_outstand_ind;
+		short	billenq_last_update_ind;
+ 		short	billenq_last_billamt_ind;
+		short	billenq_last_billdate_ind;
+		short	billenq_last_payamt_ind;
+		short	billenq_last_paymode_ind;
+		short	billenq_last_paydate_ind;
+		short	billenq_lang_ind;
+		short	billenq_min_payment_ind;
+		short	billenq_con_type_ind;
+	}a_ind[FETCH_SIZE];
+
+	int rows_to_fetch, rows_before, rows_this_time;
+
+EXEC SQL END DECLARE SECTION;
+
+	int i;
+
+	rows_to_fetch = FETCH_SIZE;		// number of rows in each "batch"  
+	rows_before = 0;				   // previous value of sqlerrd[2]   
+	rows_this_time = FETCH_SIZE; 
+
+	if((a = new psi_t[rows_to_fetch])==NULL)
+	{
+		cout<<" cant allocate memory for billenq_tab fetch"<<endl;
+		exit(0);
+	}
+
+ 
+	EXEC SQL 
+	AT customer_care 
+	DECLARE  c_billenq_tab CURSOR FOR 
+	SELECT	ROWID,
+		BILLENQ_MOB_NUM,
+		BILLENQ_ACCT_NUM, 
+		BILLENQ_PIN, 
+		BILLENQ_CURRENT, 
+		BILLENQ_OUTSTAND, 
+		BILLENQ_LAST_UPDATE, 
+		BILLENQ_LAST_BILLAMT, 
+		BILLENQ_LAST_BILLDATE, 
+		BILLENQ_LAST_PAYAMT, 
+		BILLENQ_LAST_PAYMODE, 
+		BILLENQ_LAST_PAYDATE, 
+		BILLENQ_LANG, 
+		BILLENQ_MIN_PAYMENT, 
+		BILLENQ_CON_TYPE
+	//FROM	BILLENQ_TAB_TEST;
+	FROM	BILLENQ_TAB;
+
+ 
+	EXEC SQL AT customer_care  OPEN c_billenq_tab; 
+	EXEC SQL WHENEVER NOT FOUND CONTINUE; 
+
+	while (rows_this_time == rows_to_fetch) 
+	{ 
+		EXEC SQL AT customer_care FOR :rows_to_fetch FETCH c_billenq_tab INTO :a INDICATOR :a_ind; 		 
+
+		rows_this_time = sqlca.sqlerrd[2] - rows_before; 
+		rows_before = sqlca.sqlerrd[2]; 
+//		printf(" this=%d before=%d \n", rows_this_time, rows_before);
+		printf(" billenq_tab=%d \n", rows_before);
+
+		billenq	bt;
+		
+		for(i=0; i<rows_this_time; i++)
+		{
+
+			//handling null fetches
+
+			strcpy(a[i].billenq_current,
+				  ((a_ind[i].billenq_current_ind < 0) ? "UNDEF":a[i].billenq_current));
+			strcpy(a[i].billenq_outstand,
+				  ((a_ind[i].billenq_outstand_ind < 0) ? "UNDEF":a[i].billenq_outstand));
+			strcpy(a[i].billenq_last_update,
+				  ((a_ind[i].billenq_last_update_ind < 0) ? "UNDEF":a[i].billenq_last_update));
+			strcpy(a[i].billenq_last_billamt,
+				  ((a_ind[i].billenq_last_billamt_ind < 0) ? "UNDEF":a[i].billenq_last_billamt));
+			strcpy(a[i].billenq_last_billdate,
+				  ((a_ind[i].billenq_last_billdate_ind < 0) ? "UNDEF":a[i].billenq_last_billdate));
+			strcpy(a[i].billenq_last_payamt,
+				  ((a_ind[i].billenq_last_payamt_ind < 0) ? "UNDEF":a[i].billenq_last_payamt));
+			strcpy(a[i].billenq_last_paymode,
+				  ((a_ind[i].billenq_last_paymode_ind < 0) ? "UNDEF":a[i].billenq_last_paymode));
+			strcpy(a[i].billenq_last_paydate,
+				  ((a_ind[i].billenq_last_paydate_ind < 0) ? "UNDEF":a[i].billenq_last_paydate));
+			strcpy(a[i].billenq_lang,
+				  ((a_ind[i].billenq_lang_ind < 0) ? "UNDEF":a[i].billenq_lang));
+			strcpy(a[i].billenq_min_payment,
+				  ((a_ind[i].billenq_min_payment_ind < 0) ? "UNDEF":a[i].billenq_min_payment));
+			strcpy(a[i].billenq_con_type,
+				  ((a_ind[i].billenq_con_type_ind < 0) ? "UNDEF":a[i].billenq_con_type));
+			
+			bt.init();
+
+			bt.row_id				= a[i].row_id;
+			bt.billenq_mob_num		= a[i].billenq_mob_num;
+			bt.billenq_acct_num		= a[i].billenq_acct_num;
+			bt.billenq_pin			= a[i].billenq_pin;
+			bt.billenq_current		= a[i].billenq_current;
+			bt.billenq_outstand		= a[i].billenq_outstand;
+			bt.billenq_last_update	= a[i].billenq_last_update;
+			bt.billenq_last_billamt	= a[i].billenq_last_billamt;
+			bt.billenq_last_billdate= a[i].billenq_last_billdate;
+			bt.billenq_last_payamt	= a[i].billenq_last_payamt;
+			bt.billenq_last_paymode	= a[i].billenq_last_paymode;
+			bt.billenq_last_paydate	= a[i].billenq_last_paydate;
+			bt.billenq_lang			= a[i].billenq_lang;
+			bt.billenq_min_payment	= a[i].billenq_min_payment;
+			bt.billenq_con_type		= a[i].billenq_con_type;
+
+			billenq_db_map.insert(BILLENQ_DEF::value_type(a[i].billenq_mob_num, bt));
+		}
+	} 
+
+	EXEC SQL AT customer_care CLOSE c_billenq_tab; 
+	delete a;
+	printf("%d  billenq_tab data read.\n\n",rows_before);
+}
+
+/*
+void churn::db_read_prov_switch_image()
+{
+	EXEC SQL BEGIN DECLARE SECTION;
+
+	struct psi_t
+	{ 
+		int		image_id;							// number(10)
+		char	imsi_no[BUF_LEN];					// varchar2(15)
+		char	conn_type[BUF_LEN];					// varchar2(10)
+		char	status_reason_id[BUF_LEN];			// varchar2(5)
+		char	switch_status[BUF_LEN];				// varchar2(2)
+	} *a;
+
+	struct psi_ind
+	{ 
+ 		short	image_id_ind;
+		short	imsi_no_ind;
+		short	conn_type_ind;
+		short	status_reason_id_ind;	
+		short	switch_status_ind;		
+	}a_ind[FETCH_SIZE];
+
+	int rows_to_fetch, rows_before, rows_this_time;
+
+EXEC SQL END DECLARE SECTION;
+
+	int i;
+
+	rows_to_fetch = FETCH_SIZE;		// number of rows in each "batch"  
+	rows_before = 0;				   // previous value of sqlerrd[2]   
+	rows_this_time = FETCH_SIZE; 
+
+	if((a = new psi_t[rows_to_fetch])==NULL)
+	{
+		cout<<" cant allocate memory for prov_switch_image fetch"<<endl;
+		exit(0);
+	}
+
+ 
+	EXEC SQL 
+	AT customer_care 
+	DECLARE  c_psi CURSOR FOR 
+	SELECT	IMAGE_ID,
+			IMSI_NO,
+			CONN_TYPE,
+			STATUS_REASON_ID,
+			SWITCH_STATUS
+	FROM	PROV_SWITCH_IMAGE;
+
+ 
+	EXEC SQL AT customer_care  OPEN c_psi; 
+	EXEC SQL WHENEVER NOT FOUND CONTINUE; 
+
+	while (rows_this_time == rows_to_fetch) 
+	{ 
+		EXEC SQL AT customer_care FOR :rows_to_fetch FETCH c_psi INTO :a INDICATOR :a_ind; 		 
+
+		rows_this_time = sqlca.sqlerrd[2] - rows_before; 
+		rows_before = sqlca.sqlerrd[2]; 
+//		printf(" this=%d before=%d \n", rows_this_time, rows_before);
+		printf(" prov_switch_image=%d \n", rows_before);
+
+		prov_switch_image	psi;
+		churn_data			cd;
+		ccbs_profile		ccbs_p;
+
+		DOC_DEF::iterator i_doc;
+
+		
+		for(i=0; i<rows_this_time; i++)
+		{
+
+			//handling null fetches
+
+			a[i].image_id = (a_ind[i].image_id_ind < 0) ? 0 : a[i].image_id;
+			strcpy(a[i].imsi_no,
+				  ((a_ind[i].imsi_no_ind < 0) ? "UNDEF":a[i].imsi_no));
+			strcpy(a[i].conn_type,
+				  ((a_ind[i].conn_type_ind < 0) ? "UNDEF":a[i].conn_type));
+			strcpy(a[i].status_reason_id,
+				  ((a_ind[i].status_reason_id_ind < 0) ? "UNDEF":a[i].status_reason_id));
+			strcpy(a[i].switch_status,
+				  ((a_ind[i].switch_status_ind < 0) ? "UNDEF":a[i].switch_status));
+			
+			//if ( ( strncmp(a[i].conn_type, "VOICEPRE", 8) != 0 ) && ( strncmp(a[i].switch_status, "D", 1) != 0 ) )
+			if ( strncmp(a[i].switch_status, "D", 1) != 0 )
+			{
+				ccbs_p.init();
+				ccbs_p.imsi		= a[i].imsi_no;
+				//ccbs_p.image_id	= a[i].image_id;
+
+				//psi_map.insert(PSI_DEF::value_type(a[i].image_id, a[i].imsi_no));
+
+				ccbs_profile_map.insert(CCBS_PROFILE_DEF::value_type(a[i].imsi_no, ccbs_p));
+
+			}
+		}
+	} 
+
+	EXEC SQL AT customer_care CLOSE c_psi; 
+	delete a;
+	printf("%d  prov_switch_image data read.\n\n",rows_before);
+}
+
+*/
+
+/*
+void churn::db_read_cam_contract()
+{
+	EXEC SQL BEGIN DECLARE SECTION;
+
+	struct contract_t
+	{ 
+		int		contract_id;							// number(10) - NN
+		int		subscriber_node_id;						// number(10) - NN
+		char	is_payment_responsible[BUF_LEN];		// varchar2(1)
+		float	credit_limit;							// number(11,2)
+		char	contract_type[BUF_LEN];					// varchar2(5) - NN
+		char	status[BUF_LEN];						// varchar2(2) - NN
+	} *a;
+
+	struct contract_ind
+	{ 
+		short	contract_id_ind;							
+		short	subscriber_node_id_ind;						
+		short	is_payment_responsible_ind;		
+		short	credit_limit_ind;							
+		short	contract_type_ind;					
+		short	status_ind;						
+	}a_ind[FETCH_SIZE];
+
+	int rows_to_fetch, rows_before, rows_this_time;
+
+EXEC SQL END DECLARE SECTION;
+
+	int i;
+ 
+	rows_to_fetch = FETCH_SIZE;		// number of rows in each "batch"  
+	rows_before = 0;				   // previous value of sqlerrd[2]   
+	rows_this_time = FETCH_SIZE; 
+
+	if((a = new contract_t[rows_to_fetch])==NULL)
+	{
+		cout<<" cant allocate memory for cam_contract fetch"<<endl;
+		exit(0);
+	}
+
+ 
+	EXEC SQL 
+	AT customer_care 
+	DECLARE  c_contract CURSOR FOR 
+	SELECT	CONTRACT_ID, 
+			  SUBSCRIBER_NODE_ID, 
+			  IS_PAYMENT_RESPONSIBLE, 
+			  CREDIT_LIMIT, 
+			  CONTRACT_TYPE, 
+			  STATUS 
+	FROM	CAM_CONTRACT;
+
+ 
+	EXEC SQL AT customer_care  OPEN c_contract; 
+	EXEC SQL WHENEVER NOT FOUND CONTINUE; 
+
+	cam_contract cc;
+	
+	while (rows_this_time == rows_to_fetch) 
+	{ 
+		EXEC SQL AT customer_care FOR :rows_to_fetch FETCH c_contract INTO :a INDICATOR :a_ind; 		 
+
+		rows_this_time = sqlca.sqlerrd[2] - rows_before; 
+		rows_before = sqlca.sqlerrd[2]; 
+//		printf(" this=%d before=%d \n", rows_this_time, rows_before);
+		printf(" cam_contract=%d \n", rows_before);
+
+		for(i=0; i<rows_this_time; i++)
+		{
+
+			//handling null fetches
+
+			a[i].contract_id = (a_ind[i].contract_id_ind < 0) ? 0 : a[i].contract_id;
+			a[i].subscriber_node_id = (a_ind[i].subscriber_node_id_ind < 0) ? 0 : a[i].subscriber_node_id;
+
+			strcpy(a[i].is_payment_responsible,
+				  ((a_ind[i].is_payment_responsible_ind < 0) ? "UNDEF":a[i].is_payment_responsible));
+			a[i].credit_limit = (a_ind[i].credit_limit_ind < 0) ? 0 : a[i].credit_limit;
+			strcpy(a[i].contract_type,
+				  ((a_ind[i].contract_type_ind < 0) ? "UNDEF":a[i].contract_type));
+			strcpy(a[i].status,
+				  ((a_ind[i].status_ind < 0) ? "UNDEF":a[i].status));
+
+			cc.init();
+
+			cc.contract_id				= a[i].contract_id;							
+			cc.subscriber_node_id		= a[i].subscriber_node_id;						
+			cc.is_payment_responsible	= a[i].is_payment_responsible;	
+			cc.credit_limit				= a[i].credit_limit;							
+			cc.contract_type			= a[i].contract_type;							
+			cc.status					= a[i].status;									
+
+			cam_contract_map.insert(CONTRACT_DEF::value_type(a[i].contract_id, cc));
+		}
+	} 
+
+	EXEC SQL AT customer_care CLOSE c_contract; 
+	delete a;
+	printf("%d  cam_contract data read.\n\n",rows_before);
+}
+*/
+
+/*
+void churn::db_read_cam_connection()
+{
+	EXEC SQL BEGIN DECLARE SECTION;
+
+	struct connection_t
+	{ 
+		int		connection_id;						// number(10) - NN
+		int		package_contract_id;					// number(10)
+		char	status[BUF_LEN];					// varchar2(2) - NN
+		int		image_id;							// number(10)
+	} *a;
+
+	struct connection_ind
+	{ 
+		short	connection_id_ind;
+		short	package_contract_id_ind;					
+		short	status_ind;							
+		short	image_id_ind;						
+	}a_ind[FETCH_SIZE];
+
+	int rows_to_fetch, rows_before, rows_this_time;
+
+EXEC SQL END DECLARE SECTION;
+
+	int i;
+ 
+	rows_to_fetch = FETCH_SIZE;		// number of rows in each "batch"  
+	rows_before = 0;				   // previous value of sqlerrd[2]   
+	rows_this_time = FETCH_SIZE; 
+
+	if((a = new connection_t[rows_to_fetch])==NULL)
+	{
+		cout<<" cant allocate memory for cam_connection fetch"<<endl;
+		exit(0);
+	}
+
+ 
+	EXEC SQL 
+	AT customer_care 
+	DECLARE  c_connection CURSOR FOR 
+	SELECT	CONNECTION_ID,
+			PACKAGE_CONTRACT_ID, 
+			  STATUS, 
+			  IMAGE_ID 
+	FROM	CAM_CONNECTION;
+	//FROM	CAM_CONNECTION_ivr_v;
+
+ 
+	EXEC SQL AT customer_care  OPEN c_connection; 
+	EXEC SQL WHENEVER NOT FOUND CONTINUE; 
+
+	
+	cam_connection cc;
+
+	while (rows_this_time == rows_to_fetch) 
+	{ 
+		EXEC SQL AT customer_care FOR :rows_to_fetch FETCH c_connection INTO :a INDICATOR :a_ind; 		 
+
+		rows_this_time = sqlca.sqlerrd[2] - rows_before; 
+		rows_before = sqlca.sqlerrd[2]; 
+//		printf(" this=%d before=%d \n", rows_this_time, rows_before);
+		printf(" cam_connection=%d \n", rows_before);
+
+		for(i=0; i<rows_this_time; i++)
+		{
+
+			//handling null fetches
+
+			a[i].connection_id = (a_ind[i].connection_id_ind < 0) ? 0 : a[i].connection_id;
+			a[i].package_contract_id = (a_ind[i].package_contract_id_ind < 0) ? 0 : a[i].package_contract_id;
+			strcpy(a[i].status,
+				  ((a_ind[i].status_ind < 0) ? "UNDEF":a[i].status));
+			a[i].image_id = (a_ind[i].image_id_ind < 0) ? 0 : a[i].image_id;
+			
+			
+			cc.init();
+
+			cc.connection_id			= a[i].connection_id;
+			cc.package_contract_id		= a[i].package_contract_id;					
+			cc.status					= a[i].status;
+			cc.image_id					= a[i].image_id;
+
+			cam_connection_map.insert(CONNECTION_DEF::value_type(a[i].connection_id, cc));
+
+			if(set_current(a[i].image_id))
+			{
+				current->connection_id			= a[i].connection_id;
+				current->package_contract_id	= a[i].package_contract_id;
+			}
+			
+
+			if ( strncmp(a[i].status, "D", 1) != 0 )
+			{
+				cc_multimap.insert(CC_DEF::value_type(a[i].image_id, a[i].connection_id));
+			}
+		}
+	} 
+
+	EXEC SQL AT customer_care CLOSE c_connection; 
+	delete a;
+	printf("%d  cam_connection data read.\n\n",rows_before);
+}
+*/
+
+/*
+void churn::db_read_dyn_1_connection()
+{
+	EXEC SQL BEGIN DECLARE SECTION;
+
+	struct connection_t
+	{ 
+		char	imsi[BUF_LEN];					// varchar2(20)
+		char	start_date[BUF_LEN];			// date - NN
+		char	end_date[BUF_LEN];				// date
+		char	status[BUF_LEN];				// varchar2(2)
+	} *a;
+
+	struct connection_ind
+	{ 
+		short	imsi_ind;			
+		short	start_date_ind;	
+		short	end_date_ind;
+		short	status_ind;		
+	}a_ind[FETCH_SIZE];
+
+	int rows_to_fetch, rows_before, rows_this_time;
+
+	char	b_check_date[20];
+
+	EXEC SQL END DECLARE SECTION;
+
+	strcpy(b_check_date, check_date);
+
+	int i;
+	rows_to_fetch = FETCH_SIZE;		// number of rows in each "batch"  
+	rows_before = 0;				   // previous value of sqlerrd[2]   
+	rows_this_time = FETCH_SIZE; 
+
+	if((a = new connection_t[rows_to_fetch])==NULL)
+	{
+		cout<<" cant allocate memeory for dyn_1_connection fetch"<<endl;
+		exit(0);
+	}
+
+	cout << "b_check_date = " << b_check_date << "|" << endl;
+
+	ccbs_profile ccbs_p;
+
+ 
+	EXEC SQL 
+	AT customer_care 
+	DECLARE  c_conn CURSOR FOR 
+	SELECT	IMSI,
+			START_DATE,
+			END_DATE,
+			STATUS
+	FROM	DYN_1_CONNECTION_H
+	WHERE	SERVICE_ID IN(1,2,3);
+
+	//AND		to_date(to_char(START_DATE, 'YYYYMMDDHH24MISS'),'YYYYMMDDHH24MISS') < to_date (to_char(:b_check_date, 'YYYYMMDDHH24MISS'),'YYYYMMDDHH24MISS');
+
+	//AND		STATUS NOT IN('D');
+
+	//AND		to_date (to_char(:b_check_date, 'YYYYMMDDHH24MISS')) BETWEEN to_date(to_char(START_DATE, 'YYYYMMDDHH24MISS')) AND to_date(to_char(NVL(END_DATE, '20500101000000'),'YYYYMMDDHH24MISS'));
+	
+
+	EXEC SQL AT customer_care  OPEN c_conn; 
+	EXEC SQL WHENEVER NOT FOUND CONTINUE; 
+
+	while (rows_this_time == rows_to_fetch) 
+	{ 
+		EXEC SQL AT customer_care FOR :rows_to_fetch FETCH c_conn INTO :a INDICATOR :a_ind; 		 
+
+		rows_this_time = sqlca.sqlerrd[2] - rows_before; 
+		rows_before = sqlca.sqlerrd[2]; 
+//		printf(" this=%d before=%d \n", rows_this_time, rows_before);
+		printf(" dyn_1_connection=%d \n", rows_before);
+
+		//dyn_1_connection cc;
+		reng_date_time c_date, s_date, e_date;
+
+		check_date[14] = '\0';
+		c_date.set_date_time(check_date);
+
+
+
+		for(i=0; i<rows_this_time; i++)
+		{
+
+			//handling null fetches
+
+			strcpy(a[i].imsi,
+				  ((a_ind[i].imsi_ind < 0) ? "UNDEF":a[i].imsi));
+			strcpy(a[i].start_date,
+				  ((a_ind[i].start_date_ind < 0) ? "19490101000000":a[i].start_date));
+			strcpy(a[i].end_date,
+				  ((a_ind[i].end_date_ind < 0) ? "20500101000000":a[i].end_date));
+			strcpy(a[i].status,
+				  ((a_ind[i].status_ind < 0) ? "UNDEF":a[i].status));
+
+			a[i].start_date[14] = '\0';
+			s_date.set_date_time(a[i].start_date);
+
+			a[i].end_date[14] = '\0';
+			e_date.set_date_time(a[i].end_date);
+			
+
+			//if ( ( db_first_minus_second(check_date, a[i].start_date) > 0 ) && ( 
+			//db_first_minus_second(a[i].end_date, check_date) > 0 ) )
+			
+			
+			//if ( ( strncmp(a[i].status, "D", 1) != 0 ) && ( db_first_minus_second(check_date, a[i].start_date) > 0 ) && ( 
+			//db_first_minus_second(a[i].end_date, check_date) > 0 ) )
+			
+			if ( ( strncmp(a[i].status, "D", 1) != 0 ) && ( s_date < c_date ) && ( 
+			c_date < e_date ) )
+			{
+				ccbs_p.init();
+				ccbs_p.imsi		= a[i].imsi;
+
+				ccbs_profile_map.insert(CCBS_PROFILE_DEF::value_type(a[i].imsi, ccbs_p));
+				//cout << "put to map" << endl;
+			}
+
+			//int jj;
+
+			//cin >> jj;
+		}
+	}
+	
+	EXEC SQL AT customer_care CLOSE c_conn; 
+	delete a;
+	printf("%d  dyn_1_connection data read.\n\n",rows_before);
+}
+*/
+
+void churn::db_read_cam_subscriber_node()
+{
+	EXEC SQL BEGIN DECLARE SECTION;
+
+	struct subscriber_t
+	{ 
+		int		subscriber_node_id;				// number(10) - NN
+		int		subscriber_profile_id;			// number(10) - NN
+		char	is_payment_responsible[BUF_LEN];	// varchar2(1)
+		char	status[BUF_LEN];				// varchar2(2) - NN
+	} *a;
+
+	struct subscriber_ind
+	{ 
+		short	subscriber_node_id_ind;			
+		short	subscriber_profile_id_ind;		
+		short	is_payment_responsible_ind;		
+		short	status_ind;						
+	}a_ind[FETCH_SIZE];
+
+	int rows_to_fetch, rows_before, rows_this_time;
+
+	EXEC SQL END DECLARE SECTION;
+
+	int i;
+	rows_to_fetch = FETCH_SIZE;		// number of rows in each "batch"  
+	rows_before = 0;				   // previous value of sqlerrd[2]   
+	rows_this_time = FETCH_SIZE; 
+
+	if((a = new subscriber_t[rows_to_fetch])==NULL)
+	{
+		cout<<" cant allocate memeory for cam_subscriber_node fetch"<<endl;
+		exit(0);
+	}
+
+ 
+	EXEC SQL 
+	AT customer_care 
+	DECLARE  c_subscriber CURSOR FOR 
+	SELECT	SUBSCRIBER_NODE_ID, 
+		  SUBSCRIBER_PROFILE_ID, 
+		  IS_PAYMENT_RESPONSIBLE, 
+		  STATUS
+	FROM	CAM_SUBSCRIBER_NODE;
+
+	EXEC SQL AT customer_care  OPEN c_subscriber; 
+	EXEC SQL WHENEVER NOT FOUND CONTINUE; 
+
+	cam_subscriber_node cc;
+	
+	while (rows_this_time == rows_to_fetch) 
+	{ 
+		EXEC SQL AT customer_care FOR :rows_to_fetch FETCH c_subscriber INTO :a INDICATOR :a_ind; 		 
+
+		rows_this_time = sqlca.sqlerrd[2] - rows_before; 
+		rows_before = sqlca.sqlerrd[2]; 
+//		printf(" this=%d before=%d \n", rows_this_time, rows_before);
+		printf(" cam_subscriber_node=%d \n", rows_before);
+
+		for(i=0; i<rows_this_time; i++)
+		{
+
+			//handling null fetches
+
+			a[i].subscriber_node_id = (a_ind[i].subscriber_node_id_ind < 0) ? 0 : a[i].subscriber_node_id;
+			a[i].subscriber_profile_id = (a_ind[i].subscriber_profile_id_ind < 0) ? 0 : a[i].subscriber_profile_id;
+			strcpy(a[i].is_payment_responsible,
+				  ((a_ind[i].is_payment_responsible_ind < 0) ? "UNDEF":a[i].is_payment_responsible));
+			strcpy(a[i].status,
+				  ((a_ind[i].status_ind < 0) ? "UNDEF":a[i].status));
+			
+			cc.init();
+
+			cc.subscriber_node_id		= a[i].subscriber_node_id ;				
+			cc.subscriber_profile_id	= a[i].subscriber_profile_id ;			
+			cc.is_payment_responsible	= a[i].is_payment_responsible ;		
+			cc.status					= a[i].status ;						
+
+			cam_subscriber_node_map.insert(CAM_SUBSCRIBER_NODE_DEF::value_type(a[i].subscriber_node_id, cc));
+		}
+	}
+	
+	EXEC SQL AT customer_care CLOSE c_subscriber; 
+	delete a;
+	printf("%d  cam_subscriber_node data read.\n\n",rows_before);
+}
+
+
+/*
+void churn::db_read_cam_contract_package()
+{
+	EXEC SQL BEGIN DECLARE SECTION;
+
+	struct contract_package_t
+	{ 
+		int		contract_package_id;					// number(10) - NN
+		int		contract_id;							// number(10)
+		char	status[BUF_LEN];						// varchar2(2) - NN
+	} *a;
+
+	struct contract_package_ind
+	{ 
+		short	contract_package_id_ind;					
+		short	contract_id_ind;							
+		short	status_ind;									
+	}a_ind[FETCH_SIZE];
+
+	int rows_to_fetch, rows_before, rows_this_time;
+
+	EXEC SQL END DECLARE SECTION;
+
+	int i;
+	rows_to_fetch = FETCH_SIZE;		// number of rows in each "batch"  
+	rows_before = 0;				   // previous value of sqlerrd[2]   
+	rows_this_time = FETCH_SIZE; 
+
+	if((a = new contract_package_t[rows_to_fetch])==NULL)
+	{
+		cout<<" cant allocate memeory for cam_contract_package fetch"<<endl;
+		exit(0);
+	}
+
+ 
+	EXEC SQL 
+	AT customer_care 
+	DECLARE  c_ccp CURSOR FOR 
+	SELECT	CONTRACT_PACKAGE_ID, 
+		  CONTRACT_ID, 
+		  STATUS 
+	FROM	CAM_CONTRACT_PACKAGE;
+
+	EXEC SQL AT customer_care  OPEN c_ccp; 
+	EXEC SQL WHENEVER NOT FOUND CONTINUE; 
+
+	cam_contract_package cc;
+	
+	while (rows_this_time == rows_to_fetch) 
+	{ 
+		EXEC SQL AT customer_care FOR :rows_to_fetch FETCH c_ccp INTO :a INDICATOR :a_ind; 		 
+
+		rows_this_time = sqlca.sqlerrd[2] - rows_before; 
+		rows_before = sqlca.sqlerrd[2]; 
+//		printf(" this=%d before=%d \n", rows_this_time, rows_before);
+		printf(" cam_contract_package =%d \n", rows_before);
+
+		for(i=0; i<rows_this_time; i++)
+		{
+			//handling null fetches
+
+			a[i].contract_package_id = (a_ind[i].contract_package_id_ind < 0) ? 0 : a[i].contract_package_id;
+			a[i].contract_id = (a_ind[i].contract_id_ind < 0) ? 0 : a[i].contract_id;
+			strcpy(a[i].status,
+				  ((a_ind[i].status_ind < 0) ? "UNDEF":a[i].status));
+
+			cc.init();
+
+			cc.contract_package_id		= a[i].contract_package_id;
+			cc.contract_id				= a[i].contract_id;
+			cc.status					= a[i].status;
+
+			cam_contract_package_map.insert(CAM_CONTRACT_PACKAGE_DEF::value_type(a[i].contract_package_id, cc));
+		}
+	}
+	
+	EXEC SQL AT customer_care CLOSE c_ccp; 
+	delete a;
+	printf("%d  cam_contract_package data read.\n\n",rows_before);
+}
+*/
+
+
+
+
+void churn::db_read_cam_subscriber_profile()
+{
+	EXEC SQL BEGIN DECLARE SECTION;
+
+	struct profile_t
+	{ 
+		int		subscriber_profile_id;			// number(10)
+		char	communication_language_id[BUF_LEN];	// varchar2(5)
+	} *a;
+
+	struct profile_ind
+	{ 
+		short	subscriber_profile_id_ind;
+		short	communication_language_id_ind;		
+	}a_ind[FETCH_SIZE];
+
+	int rows_to_fetch, rows_before, rows_this_time;
+
+	EXEC SQL END DECLARE SECTION;
+
+	int i;
+	rows_to_fetch = FETCH_SIZE;		// number of rows in each "batch"  
+	rows_before = 0;				   // previous value of sqlerrd[2]   
+	rows_this_time = FETCH_SIZE; 
+
+	if((a = new profile_t[rows_to_fetch])==NULL)
+	{
+		cout<<" cant allocate memeory for cam_subscriber_profile fetch"<<endl;
+		exit(0);
+	}
+
+ 
+	EXEC SQL 
+	AT customer_care 
+	DECLARE  c_profile CURSOR FOR 
+	SELECT	SUBSCRIBER_PROFILE_ID,
+			COMMUNICATION_LANGUAGE_ID
+	FROM	CAM_SUBSCRIBER_PROFILE;
+
+	EXEC SQL AT customer_care  OPEN c_profile; 
+	EXEC SQL WHENEVER NOT FOUND CONTINUE; 
+
+	cam_subscriber_profile csp;
+	
+	while (rows_this_time == rows_to_fetch) 
+	{ 
+		EXEC SQL AT customer_care FOR :rows_to_fetch FETCH c_profile INTO :a INDICATOR :a_ind; 		 
+
+		rows_this_time = sqlca.sqlerrd[2] - rows_before; 
+		rows_before = sqlca.sqlerrd[2]; 
+//		printf(" this=%d before=%d \n", rows_this_time, rows_before);
+		printf(" cam_subscriber_profile =%d \n", rows_before);
+
+		for(i=0; i<rows_this_time; i++)
+		{
+
+			//handling null fetches
+
+			a[i].subscriber_profile_id = (a_ind[i].subscriber_profile_id_ind < 0) ? 0 : a[i].subscriber_profile_id;
+			strcpy(a[i].communication_language_id,
+				  ((a_ind[i].communication_language_id_ind < 0) ? "ENG":a[i].communication_language_id));
+			
+			csp.init();
+			csp.communication_language_id=a[i].communication_language_id;
+
+			cam_subscriber_profile_map.insert(PROFILE_DEF::value_type(a[i].subscriber_profile_id, csp));
+		}
+	}
+	
+	EXEC SQL AT customer_care CLOSE c_profile; 
+	delete a;
+	printf("%d  cam_subscriber_profile data read.\n\n",rows_before);
+}
+
+
+void churn::db_read_bill_i_pr_master()
+{
+	EXEC SQL BEGIN DECLARE SECTION;
+
+	struct profile_t
+	{ 
+		int		node_id;				// number(10)
+		char	node_type[BUF_LEN];		// varchar2(2)
+		float	brought_fwd;			// number(14,2)
+		float	interim_bill_amount;	// number(14,2)
+	} *a;
+
+	struct profile_ind
+	{ 
+		short	node_id_ind;
+		short	node_type_ind;
+		short	brought_fwd_ind;
+		short	interim_bill_amount_ind;
+	}a_ind[FETCH_SIZE];
+
+	int rows_to_fetch, rows_before, rows_this_time;
+
+	EXEC SQL END DECLARE SECTION;
+
+	int i;
+	rows_to_fetch = FETCH_SIZE;		// number of rows in each "batch"  
+	rows_before = 0;				   // previous value of sqlerrd[2]   
+	rows_this_time = FETCH_SIZE; 
+
+	if((a = new profile_t[rows_to_fetch])==NULL)
+	{
+		cout<<" cant allocate memeory for bill_i_pr_master fetch"<<endl;
+		exit(0);
+	}
+
+ 
+	EXEC SQL 
+	AT customer_care 
+	DECLARE  c_bill_i_pr_master CURSOR FOR 
+	SELECT	NODE_ID,
+			NODE_TYPE,
+			BROUGHT_FWD,
+			INTERIM_BILL_AMOUNT
+	FROM	BILL_I_PR_MASTER;
+
+	EXEC SQL AT customer_care  OPEN c_bill_i_pr_master; 
+	EXEC SQL WHENEVER NOT FOUND CONTINUE; 
+
+	bill_i_pr_master bipm;
+	
+	while (rows_this_time == rows_to_fetch) 
+	{ 
+		EXEC SQL AT customer_care FOR :rows_to_fetch FETCH c_bill_i_pr_master INTO :a INDICATOR :a_ind; 		 
+
+		rows_this_time = sqlca.sqlerrd[2] - rows_before; 
+		rows_before = sqlca.sqlerrd[2]; 
+//		printf(" this=%d before=%d \n", rows_this_time, rows_before);
+		printf(" bill_i_pr_master =%d \n", rows_before);
+
+		for(i=0; i<rows_this_time; i++)
+		{
+
+			//handling null fetches
+
+			a[i].node_id = (a_ind[i].node_id_ind < 0) ? 0 : a[i].node_id;
+			strcpy(a[i].node_type,
+				  ((a_ind[i].node_type_ind < 0) ? "UNDEF":a[i].node_type));
+			a[i].brought_fwd = (a_ind[i].brought_fwd_ind < 0) ? 0.0 : a[i].brought_fwd;
+			a[i].interim_bill_amount = (a_ind[i].interim_bill_amount_ind < 0) ? 0.0 : a[i].interim_bill_amount;
+
+			if ( strncmp(a[i].node_type, "C", 1) == 0 )
+			{
+				bipm.init();
+				bipm.brought_fwd			= a[i].brought_fwd;
+				bipm.interim_bill_amount	= a[i].interim_bill_amount;
+
+				bill_i_pr_master_map.insert(BILL_I_PR_MASTER_DEF::value_type(a[i].node_id, bipm));
+			}
+		}
+	}
+	
+	EXEC SQL AT customer_care CLOSE c_bill_i_pr_master; 
+	delete a;
+	printf("%d  bill_i_pr_master data read.\n\n",rows_before);
+}
+
+
+void churn::db_read_bill_i_nonpr_contract_master()
+{
+	EXEC SQL BEGIN DECLARE SECTION;
+
+	struct profile_t
+	{ 
+		int		contract_id;					// number(10)
+		float	brought_forward_outstanding;	// number(14,2)
+		float	interim_bill_amount;			// number(14,2)
+	} *a;
+
+	struct profile_ind
+	{ 
+		short	contract_id_ind;
+		short	brought_forward_outstanding_ind;
+		short	interim_bill_amount_ind;
+	}a_ind[FETCH_SIZE];
+
+	int rows_to_fetch, rows_before, rows_this_time;
+
+	EXEC SQL END DECLARE SECTION;
+
+	int i;
+	rows_to_fetch = FETCH_SIZE;		// number of rows in each "batch"  
+	rows_before = 0;				   // previous value of sqlerrd[2]   
+	rows_this_time = FETCH_SIZE; 
+
+	if((a = new profile_t[rows_to_fetch])==NULL)
+	{
+		cout<<" cant allocate memeory for bill_i_nonpr_contract_master fetch"<<endl;
+		exit(0);
+	}
+
+ 
+	EXEC SQL 
+	AT customer_care 
+	DECLARE  c_bill_i_nonpr_contract_master CURSOR FOR 
+	SELECT	CONTRACT_ID,
+			BROUGHT_FORWARD_OUTSTANDING,
+			INTERIM_BILL_AMOUNT
+	FROM	BILL_I_NONPR_CONTRACT_MASTER;
+
+	EXEC SQL AT customer_care  OPEN c_bill_i_nonpr_contract_master; 
+	EXEC SQL WHENEVER NOT FOUND CONTINUE; 
+
+	bill_i_nonpr_contract_master binpcm;
+	
+	while (rows_this_time == rows_to_fetch) 
+	{ 
+		EXEC SQL AT customer_care FOR :rows_to_fetch FETCH c_bill_i_nonpr_contract_master INTO :a INDICATOR :a_ind; 		 
+
+		rows_this_time = sqlca.sqlerrd[2] - rows_before; 
+		rows_before = sqlca.sqlerrd[2]; 
+//		printf(" this=%d before=%d \n", rows_this_time, rows_before);
+		printf(" bill_i_nonpr_contract_master =%d \n", rows_before);
+
+		for(i=0; i<rows_this_time; i++)
+		{
+
+			//handling null fetches
+
+			a[i].contract_id = (a_ind[i].contract_id_ind < 0) ? 0 : a[i].contract_id;
+			a[i].brought_forward_outstanding = (a_ind[i].brought_forward_outstanding_ind < 0) ? 0.0 : a[i].brought_forward_outstanding;
+			a[i].interim_bill_amount = (a_ind[i].interim_bill_amount_ind < 0) ? 0.0 : a[i].interim_bill_amount;
+
+			binpcm.init();
+			binpcm.brought_forward_outstanding			= a[i].brought_forward_outstanding;
+			binpcm.interim_bill_amount	= a[i].interim_bill_amount;
+
+			bill_i_nonpr_contract_master_map.insert(BILL_I_NONPR_CONTRACT_MASTER_DEF::value_type(a[i].contract_id, binpcm));
+		}
+	}
+	
+	EXEC SQL AT customer_care CLOSE c_bill_i_nonpr_contract_master; 
+	delete a;
+	printf("%d  bill_i_nonpr_contract_master data read.\n\n",rows_before);
+}
+
+
+void churn::db_read_bill_bill_master_summary()
+{
+	EXEC SQL BEGIN DECLARE SECTION;
+
+	struct contract_balances_t
+	{ 
+		int		node_id;					// number(10)
+		char	node_type[BUF_LEN];			// varchar2(1)
+		float	amount;						// number(14,2)
+	} *a;
+
+	struct contract_balances_ind
+	{ 
+		short	node_id_ind;					
+		short	node_type_ind;				
+		short	amount_ind;					
+	}a_ind[FETCH_SIZE];
+
+	int rows_to_fetch, rows_before, rows_this_time;
+
+	EXEC SQL END DECLARE SECTION;
+
+	int i;
+	rows_to_fetch = FETCH_SIZE;		// number of rows in each "batch"  
+	rows_before = 0;				   // previous value of sqlerrd[2]   
+	rows_this_time = FETCH_SIZE; 
+
+	if((a = new contract_balances_t[rows_to_fetch])==NULL)
+	{
+		cout<<" cant allocate memeory for bill_bill_master_summary fetch"<<endl;
+		exit(0);
+	}
+
+ 
+	EXEC SQL 
+	AT customer_care 
+	DECLARE  c_contract_balances CURSOR FOR 
+	SELECT		NODE_ID,          
+				NODE_TYPE,       
+				AMOUNT       
+	FROM	BILL_BILL_MASTER_SUMMARY
+	WHERE	ITEM_CODE = 'BILLAMT';
+
+	EXEC SQL AT customer_care  OPEN c_contract_balances; 
+	EXEC SQL WHENEVER NOT FOUND CONTINUE; 
+
+
+	while (rows_this_time == rows_to_fetch) 
+	{ 
+		EXEC SQL AT customer_care FOR :rows_to_fetch FETCH c_contract_balances INTO :a INDICATOR :a_ind; 		 
+
+		rows_this_time = sqlca.sqlerrd[2] - rows_before; 
+		rows_before = sqlca.sqlerrd[2]; 
+//		printf(" this=%d before=%d \n", rows_this_time, rows_before);
+		printf(" fb_contract_balances =%d \n", rows_before);
+
+		for(i=0; i<rows_this_time; i++)
+		{
+
+			//handling null fetches
+
+			a[i].amount = (a_ind[i].amount_ind < 0) ? 0.0 : a[i].amount;
+
+			if ( strncmp(a[i].node_type, "C", 1) == 0 )
+			{
+				bill_bill_master_summary_map.insert(BILL_BILL_MASTER_SUMMARY_DEF::value_type(a[i].node_id, a[i].amount));
+			}
+		}
+	}
+	
+	EXEC SQL AT customer_care CLOSE c_contract_balances; 
+	delete a;
+	printf("%d  bill_bill_master_summary data read.\n\n",rows_before);
+}
+
+void churn::db_read_bill_bill_statement_summary()
+{
+	EXEC SQL BEGIN DECLARE SECTION;
+
+	struct contract_balances_t
+	{ 
+		int		node_id;					// number(10)
+		char	node_type[BUF_LEN];			// varchar2(1)
+		float	amount;						// number(14,2)
+	} *a;
+
+	struct contract_balances_ind
+	{ 
+		short	node_id_ind;					
+		short	node_type_ind;			
+		short	amount_ind;					
+	}a_ind[FETCH_SIZE];
+
+	int rows_to_fetch, rows_before, rows_this_time;
+
+	EXEC SQL END DECLARE SECTION;
+
+	int i;
+	rows_to_fetch = FETCH_SIZE;		// number of rows in each "batch"  
+	rows_before = 0;				   // previous value of sqlerrd[2]   
+	rows_this_time = FETCH_SIZE; 
+
+	if((a = new contract_balances_t[rows_to_fetch])==NULL)
+	{
+		cout<<" cant allocate memeory for bill_bill_statement_summary fetch"<<endl;
+		exit(0);
+	}
+
+ 
+	EXEC SQL 
+	AT customer_care 
+	DECLARE  c_bill_bill_statement_summary CURSOR FOR 
+	SELECT		NODE_ID,          
+				NODE_TYPE,         
+				AMOUNT       
+	FROM	BILL_BILL_STATEMENT_SUMMARY
+	WHERE	ITEM_CODE = 'BILLAMT';
+
+
+	EXEC SQL AT customer_care  OPEN c_bill_bill_statement_summary; 
+	EXEC SQL WHENEVER NOT FOUND CONTINUE; 
+
+	while (rows_this_time == rows_to_fetch) 
+	{ 
+		EXEC SQL AT customer_care FOR :rows_to_fetch FETCH c_bill_bill_statement_summary INTO :a INDICATOR :a_ind; 		 
+
+		rows_this_time = sqlca.sqlerrd[2] - rows_before; 
+		rows_before = sqlca.sqlerrd[2]; 
+//		printf(" this=%d before=%d \n", rows_this_time, rows_before);
+		printf(" bill_bill_statement_summary =%d \n", rows_before);
+
+		for(i=0; i<rows_this_time; i++)
+		{
+
+			//handling null fetches
+
+			a[i].amount = (a_ind[i].amount_ind < 0) ? 0 : a[i].amount;
+
+			if ( strncmp(a[i].node_type, "C", 1) == 0 )
+			{
+				bill_bill_statement_summary_map.insert(BILL_BILL_STATEMENT_SUMMARY_DEF::value_type(a[i].node_id, a[i].amount));
+			}
+		}
+	}
+	
+	EXEC SQL AT customer_care CLOSE c_bill_bill_statement_summary; 
+	delete a;
+	printf("%d  bill_bill_statement_summary data read.\n\n",rows_before);
+}
+
+
+void churn::db_read_fb_bill_transactions()
+{
+	EXEC SQL BEGIN DECLARE SECTION;
+
+	struct bill_transactions_t
+	{
+		int		tran_no;					// number(16)
+		int		node_id;					// number(10)
+		char	node_type[BUF_LEN];			// varchar2(1) 
+		float	amount;						// number(14,2)
+		char	tran_date[BUF_LEN];			// date
+		char	tran_type[BUF_LEN];			// varchar2(10) 
+	} *a;
+
+	struct bill_transactions_ind
+	{ 
+  		short	tran_no_ind;				
+		short	node_id_ind;
+		short	node_type_ind;
+		short	amount_ind;	
+		short	tran_date_ind;
+		short	tran_type_ind;
+	}a_ind[FETCH_SIZE];
+
+	int rows_to_fetch, rows_before, rows_this_time;
+	
+	EXEC SQL END DECLARE SECTION;
+
+	int i;
+	rows_to_fetch = FETCH_SIZE;		// number of rows in each "batch"  
+	rows_before = 0;				   // previous value of sqlerrd[2]   
+	rows_this_time = FETCH_SIZE; 
+
+	if((a = new bill_transactions_t[rows_to_fetch])==NULL)
+	{
+		cout<<" cant allocate memeory for fb_bill_transactions fetch"<<endl;
+		exit(0);
+	}
+
+ 
+	EXEC SQL 
+	AT customer_care 
+	DECLARE  c_bill_transactions CURSOR FOR 
+	SELECT	TRAN_NO,
+			NODE_ID,
+			NODE_TYPE,
+			AMOUNT,
+			TRAN_DATE,
+			TRAN_TYPE
+	FROM	FB_BILL_TRANSACTIONS;
+	//WHERE	TRAN_TYPE = 'BILL';
+
+	EXEC SQL AT customer_care  OPEN c_bill_transactions; 
+	EXEC SQL WHENEVER NOT FOUND CONTINUE; 
+
+	fb_bill_transactions fbt;
+	FB_BILL_TRANSACTIONS_DEF::iterator i_fbt;
+	reng_date_time rdt;
+	
+	while (rows_this_time == rows_to_fetch) 
+	{ 
+		EXEC SQL AT customer_care FOR :rows_to_fetch FETCH c_bill_transactions INTO :a INDICATOR :a_ind; 		 
+
+		rows_this_time = sqlca.sqlerrd[2] - rows_before; 
+		rows_before = sqlca.sqlerrd[2]; 
+//		printf(" this=%d before=%d \n", rows_this_time, rows_before);
+		printf(" fb_bill_transactions =%d \n", rows_before);
+
+		for(i=0; i<rows_this_time; i++)
+		{
+
+			//handling null fetches
+
+			a[i].amount = (a_ind[i].amount_ind < 0) ? 0 : a[i].amount;
+			strcpy(a[i].tran_type,
+				  ((a_ind[i].tran_type_ind < 0) ? "UNDEF":a[i].tran_type));
+	
+			if ( strncmp(a[i].node_type, "C", 1) == 0 )		// only PR contracts
+															// non PR contracts are loaded in
+															// db_read_fb_contract_balances()
+			{
+				if ( strncmp(a[i].tran_type, "BILL", 4) == 0 )
+				{
+					if ( ( i_fbt = fb_bill_transactions_bill_map.find(a[i].node_id) ) == fb_bill_transactions_bill_map.end() )
+					{
+						fbt.init();
+						fbt.amount		= a[i].amount;					
+						fbt.tran_date	= a[i].tran_date;
+						fbt.tran_no		= a[i].tran_no;
+						a[i].tran_date[14] = '\0';
+						fbt.tran_date_rdt.set_date_time(a[i].tran_date); 
+							
+						fb_bill_transactions_bill_map.insert(FB_BILL_TRANSACTIONS_DEF::value_type(a[i].node_id, fbt));
+					}
+					else
+					{
+						rdt.date.init();
+						rdt.time.init();
+						a[i].tran_date[14] = '\0';
+						rdt.set_date_time(a[i].tran_date); 
+						if ( (*i_fbt).second.tran_date_rdt < rdt )
+						{
+							fbt.init();
+							fbt.amount		= a[i].amount;					
+							fbt.tran_date	= a[i].tran_date;
+							fbt.tran_no		= a[i].tran_no;
+							fbt.tran_date_rdt.set_date_time(a[i].tran_date); 
+
+							fb_bill_transactions_bill_map.erase(i_fbt);
+
+							fb_bill_transactions_bill_map.insert(FB_BILL_TRANSACTIONS_DEF::value_type(a[i].node_id, fbt));
+						}
+					}
+				}
+				if ( strncmp(a[i].tran_type, "PAY", 3) == 0 )
+				{
+
+					if ( ( i_fbt = fb_bill_transactions_pay_map.find(a[i].node_id) ) == fb_bill_transactions_pay_map.end() )
+					{
+						fbt.init();
+						fbt.amount		= a[i].amount;					
+						fbt.tran_date	= a[i].tran_date;
+						fbt.tran_no		= a[i].tran_no;
+						a[i].tran_date[14] = '\0';
+						fbt.tran_date_rdt.set_date_time(a[i].tran_date); 
+							
+						fb_bill_transactions_pay_map.insert(FB_BILL_TRANSACTIONS_DEF::value_type(a[i].node_id, fbt));
+					}
+					else
+					{
+						rdt.date.init();
+						rdt.time.init();
+						rdt.set_date_time(a[i].tran_date); 
+						if ( (*i_fbt).second.tran_date_rdt < rdt )
+						{
+							fbt.init();
+							fbt.amount		= a[i].amount;					
+							fbt.tran_date	= a[i].tran_date;
+							fbt.tran_no		= a[i].tran_no;
+							a[i].tran_date[14] = '\0';
+							fbt.tran_date_rdt.set_date_time(a[i].tran_date);
+
+							fb_bill_transactions_pay_map.erase(i_fbt);
+
+							fb_bill_transactions_pay_map.insert(FB_BILL_TRANSACTIONS_DEF::value_type(a[i].node_id, fbt));
+						}
+					}
+				}
+			}
+		}
+	}
+	
+	EXEC SQL AT customer_care CLOSE c_bill_transactions; 
+	delete a;
+	printf("%d  fb_bill_transactions data read.\n\n",rows_before);
+}
+
+
+
+
+
+void churn::db_read_fb_contract_balances()
+{
+
+	// not used.
+}
+
+
+void churn::db_read_fb_bill_receipts()
+{
+	EXEC SQL BEGIN DECLARE SECTION;
+
+	struct bill_transactions_t
+	{
+		int		receipt_tran_no;				// number(16)
+		char	payment_mode[BUF_LEN];			// varchar2(5)
+	} *a;
+
+	struct bill_transactions_ind
+	{ 
+		short	receipt_tran_no_ind;
+  		short	payment_mode_ind;				
+	}a_ind[FETCH_SIZE];
+
+	int rows_to_fetch, rows_before, rows_this_time;
+	
+	EXEC SQL END DECLARE SECTION;
+
+	int i;
+	rows_to_fetch = FETCH_SIZE;		// number of rows in each "batch"  
+	rows_before = 0;				   // previous value of sqlerrd[2]   
+	rows_this_time = FETCH_SIZE; 
+
+	if((a = new bill_transactions_t[rows_to_fetch])==NULL)
+	{
+		cout<<" cant allocate memeory for fb_bill_transactions fetch"<<endl;
+		exit(0);
+	}
+
+ 
+	EXEC SQL 
+	AT customer_care 
+	DECLARE  c_fb_bill_receipts CURSOR FOR 
+	SELECT	RECEIPT_TRAN_NO,	
+			PAYMENT_MODE
+	FROM	FB_BILL_RECEIPTS;
+
+	EXEC SQL AT customer_care  OPEN c_fb_bill_receipts; 
+	EXEC SQL WHENEVER NOT FOUND CONTINUE; 
+
+	
+	while (rows_this_time == rows_to_fetch) 
+	{ 
+		EXEC SQL AT customer_care FOR :rows_to_fetch FETCH c_fb_bill_receipts INTO :a INDICATOR :a_ind; 		 
+
+		rows_this_time = sqlca.sqlerrd[2] - rows_before; 
+		rows_before = sqlca.sqlerrd[2]; 
+//		printf(" this=%d before=%d \n", rows_this_time, rows_before);
+		printf(" fb_bill_receipts =%d \n", rows_before);
+
+		for(i=0; i<rows_this_time; i++)
+		{
+
+			//handling null fetches
+
+			strcpy(a[i].payment_mode,
+				  ((a_ind[i].payment_mode_ind < 0) ? "UNDEF":a[i].payment_mode));
+
+			fb_bill_receipts_map.insert(FB_BILL_RECEIPTS_DEF::value_type(a[i].receipt_tran_no, a[i].payment_mode));
+
+		}
+	}
+	
+	EXEC SQL AT customer_care CLOSE c_fb_bill_receipts; 
+	delete a;
+	printf("%d  fb_bill_receipts data read.\n\n",rows_before);
+}
+
+void churn::db_get_sysdate()
+{
+	// YYYYMMDDHH24MISS
+
+	EXEC SQL BEGIN DECLARE SECTION;
+		char	b_sysdate[20];			
+	EXEC SQL END DECLARE SECTION;
+
+	EXEC SQL
+	AT customer_care
+	SELECT SYSDATE
+	INTO	:b_sysdate	
+	FROM DUAL;
+
+	strcpy(sys_date, b_sysdate);
+	sys_date_rdt.set_date_time(sys_date);
+}
+
+
+void churn::db_insert_churn_data()
+{
+	EXEC SQL BEGIN DECLARE SECTION;
+	
+	static struct db_churn
+	{
+		int		account_no;				// number	- NN	
+		int		cx_type_id;				// number
+		float	score;					// number(14,4)
+		double	total_score;
+		int		no_of_bills;
+
+		double  network_stay_days;
+		double  nt_work_stay;                  
+		double  network_stay_points;
+
+		char	bill_no_1[21];
+		char	bill_no_2[21];
+		char	bill_no_3[21];
+		char	bill_no_4[21];
+		char	bill_no_5[21];
+		char	bill_no_6[21];
+
+		double  delay_1;
+		double  delay_2;
+		double  delay_3;
+		double  delay_4;
+		double  delay_5;
+		double  delay_6;
+
+		double  gap_1;
+		double  gap_2;
+		double  gap_3;
+		double  gap_4;
+		double  gap_5;
+		double  gap_6;
+
+		double  tot_pay_1;
+		double  tot_pay_2;
+		double  tot_pay_3;
+		double  tot_pay_4;
+		double  tot_pay_5;
+		double  tot_pay_6;
+
+		double  tot_out_1;
+		double  tot_out_2;
+		double  tot_out_3;
+		double  tot_out_4;
+		double  tot_out_5;
+		double  tot_out_6;
+
+		double  rating_1;
+		double  rating_2;
+		double  rating_3;
+		double  rating_4;
+		double  rating_5;
+		double  rating_6;
+	} *a; 
+	
+	int rows_to_insert;
+	
+	EXEC SQL END DECLARE SECTION;
+	
+	rows_to_insert = bulk_insert_size;
+	
+	if((a = new db_churn[bulk_insert_size])==NULL)
+	{
+		cout<<" cant allocate memory for churn data insert"<<endl;
+		exit(0);
+	}
+
+	for(int j=0; j<insert_iterations; j++)
+	{
+
+		for(int n=0; n<rows_to_insert; n++)
+		{
+			a[n].account_no		= 0;
+			a[n].cx_type_id		= 0;
+			a[n].score			= 0.0;
+			a[n].total_score	= 0.0;
+			a[n].no_of_bills	= 0;
+
+			a[n].network_stay_days		= 0.0;
+			a[n].nt_work_stay			= 0.0;                  
+			a[n].network_stay_points	= 0.0;
+
+			a[n].bill_no_1[0]	= '\0';
+			a[n].bill_no_2[0]	= '\0';
+			a[n].bill_no_3[0]	= '\0';
+			a[n].bill_no_4[0]	= '\0';
+			a[n].bill_no_5[0]	= '\0';
+			a[n].bill_no_6[0]	= '\0';
+
+			a[n].delay_1= 0.0;
+			a[n].delay_2= 0.0;
+			a[n].delay_3= 0.0;
+			a[n].delay_4= 0.0;
+			a[n].delay_5= 0.0;
+			a[n].delay_6= 0.0;
+
+			a[n].gap_1= 0.0;
+			a[n].gap_2= 0.0;
+			a[n].gap_3= 0.0;
+			a[n].gap_4= 0.0;
+			a[n].gap_5= 0.0;
+			a[n].gap_6= 0.0;
+
+			a[n].tot_pay_1= 0.0;
+			a[n].tot_pay_2= 0.0;
+			a[n].tot_pay_3= 0.0;
+			a[n].tot_pay_4= 0.0;
+			a[n].tot_pay_5= 0.0;
+			a[n].tot_pay_6= 0.0;
+
+			a[n].tot_out_1= 0.0;
+			a[n].tot_out_2= 0.0;
+			a[n].tot_out_3= 0.0;
+			a[n].tot_out_4= 0.0;
+			a[n].tot_out_5= 0.0;
+			a[n].tot_out_6= 0.0;
+
+			a[n].rating_1= 0.0;
+			a[n].rating_2= 0.0;
+			a[n].rating_3= 0.0;
+			a[n].rating_4= 0.0;
+			a[n].rating_5= 0.0;
+			a[n].rating_6= 0.0;
+
+		}
+		
+		for(int i=0; i<rows_to_insert; i++, i_db_insert++)
+		{
+			a[i].account_no		= (*i_db_insert).second.account_no;
+			a[i].cx_type_id		= (*i_db_insert).second.cx_type_id;
+			a[i].score			= (*i_db_insert).second.average_score;
+			a[i].total_score	= (*i_db_insert).second.total_score;
+			a[i].no_of_bills	= (*i_db_insert).second.no_of_bills;
+
+			a[i].network_stay_days		= (*i_db_insert).second.network_stay_days;
+			a[i].nt_work_stay			= (*i_db_insert).second.nt_work_stay;                  
+			a[i].network_stay_points	= (*i_db_insert).second.network_stay_points;
+
+
+			strcpy(a[i].bill_no_1, (*i_db_insert).second.bill_no_1);
+			strcpy(a[i].bill_no_2, (*i_db_insert).second.bill_no_2);
+			strcpy(a[i].bill_no_3, (*i_db_insert).second.bill_no_3);
+			strcpy(a[i].bill_no_4, (*i_db_insert).second.bill_no_4);
+			strcpy(a[i].bill_no_5, (*i_db_insert).second.bill_no_5);
+			strcpy(a[i].bill_no_6, (*i_db_insert).second.bill_no_6);
+
+
+			a[i].delay_1	= (*i_db_insert).second.delay_1;
+			a[i].delay_2	= (*i_db_insert).second.delay_2;
+			a[i].delay_3	= (*i_db_insert).second.delay_3;
+			a[i].delay_4	= (*i_db_insert).second.delay_4;
+			a[i].delay_5	= (*i_db_insert).second.delay_5;
+			a[i].delay_6	= (*i_db_insert).second.delay_6;
+
+			a[i].gap_1		= (*i_db_insert).second.gap_1;
+			a[i].gap_2		= (*i_db_insert).second.gap_2;
+			a[i].gap_3		= (*i_db_insert).second.gap_3;
+			a[i].gap_4		= (*i_db_insert).second.gap_4;
+			a[i].gap_5		= (*i_db_insert).second.gap_5;
+			a[i].gap_6		= (*i_db_insert).second.gap_6;
+
+			a[i].tot_pay_1	= (*i_db_insert).second.tot_pay_1;
+			a[i].tot_pay_2	= (*i_db_insert).second.tot_pay_2;
+			a[i].tot_pay_3	= (*i_db_insert).second.tot_pay_3;
+			a[i].tot_pay_4	= (*i_db_insert).second.tot_pay_4;
+			a[i].tot_pay_5	= (*i_db_insert).second.tot_pay_5;
+			a[i].tot_pay_6	= (*i_db_insert).second.tot_pay_6;
+
+			a[i].tot_out_1	= (*i_db_insert).second.tot_out_1;
+			a[i].tot_out_2	= (*i_db_insert).second.tot_out_2;
+			a[i].tot_out_3	= (*i_db_insert).second.tot_out_3;
+			a[i].tot_out_4	= (*i_db_insert).second.tot_out_4;
+			a[i].tot_out_5	= (*i_db_insert).second.tot_out_5;
+			a[i].tot_out_6	= (*i_db_insert).second.tot_out_6;
+
+			a[i].rating_1	= (*i_db_insert).second.rating_1;
+			a[i].rating_2	= (*i_db_insert).second.rating_2;
+			a[i].rating_3	= (*i_db_insert).second.rating_3;
+			a[i].rating_4	= (*i_db_insert).second.rating_4;
+			a[i].rating_5	= (*i_db_insert).second.rating_5;
+			a[i].rating_6	= (*i_db_insert).second.rating_6;
+		} 
+
+		EXEC SQL  AT customer_care  FOR :rows_to_insert  INSERT INTO CX_PROFILED_DETAILS (
+			ACCOUNT_NO,
+			CX_TYPE_ID,
+			SCORE,
+			TOTAL_SCORE,
+			NO_OF_BILLS,
+			network_stay_days,
+			nt_work_stay,                  
+			network_stay_points,
+			bill_no_1,
+			bill_no_2,
+			bill_no_3,
+			bill_no_4,
+			bill_no_5,
+			bill_no_6,
+			delay_1,
+			delay_2,
+			delay_3,
+			delay_4,
+			delay_5,
+			delay_6,
+			gap_1,
+			gap_2,
+			gap_3,
+			gap_4,
+			gap_5,
+			gap_6,
+			tot_pay_1,
+			tot_pay_2,
+			tot_pay_3,
+			tot_pay_4,
+			tot_pay_5,
+			tot_pay_6,
+			tot_out_1,
+			tot_out_2,
+			tot_out_3,
+			tot_out_4,
+			tot_out_5,
+			tot_out_6,
+			rating_1,
+			rating_2,
+			rating_3,
+			rating_4,
+			rating_5,
+			rating_6
+		) VALUES (:a);
+	
+		EXEC SQL AT customer_care  COMMIT;
+	}
+	
+	delete a;
+}
+
+void churn::db_insert_churn_data_remainder()
+{
+	EXEC SQL BEGIN DECLARE SECTION;
+	
+	static struct db_churn
+	{
+		int		account_no;				// number	- NN	
+		int		cx_type_id;				// number
+		float	score;					// number(14,4)
+		double	total_score;
+		int		no_of_bills;
+
+		double  network_stay_days;
+		double  nt_work_stay;                  
+		double  network_stay_points;
+
+		char	bill_no_1[21];
+		char	bill_no_2[21];
+		char	bill_no_3[21];
+		char	bill_no_4[21];
+		char	bill_no_5[21];
+		char	bill_no_6[21];
+
+		double  delay_1;
+		double  delay_2;
+		double  delay_3;
+		double  delay_4;
+		double  delay_5;
+		double  delay_6;
+
+		double  gap_1;
+		double  gap_2;
+		double  gap_3;
+		double  gap_4;
+		double  gap_5;
+		double  gap_6;
+
+		double  tot_pay_1;
+		double  tot_pay_2;
+		double  tot_pay_3;
+		double  tot_pay_4;
+		double  tot_pay_5;
+		double  tot_pay_6;
+
+		double  tot_out_1;
+		double  tot_out_2;
+		double  tot_out_3;
+		double  tot_out_4;
+		double  tot_out_5;
+		double  tot_out_6;
+
+		double  rating_1;
+		double  rating_2;
+		double  rating_3;
+		double  rating_4;
+		double  rating_5;
+		double  rating_6;
+	} *a;  
+	
+	int rows_to_insert;
+	
+	EXEC SQL END DECLARE SECTION;
+	rows_to_insert = remainder_insert_size;
+	
+	if((a = new db_churn[remainder_insert_size])==NULL)
+	{
+		cout<<" cant allocate memory for churn data insert"<<endl;
+		exit(0);
+	}
+
+	for(int n=0; n<rows_to_insert; n++)
+	{
+			a[n].account_no		= 0;
+			a[n].cx_type_id		= 0;
+			a[n].score			= 0.0;
+			a[n].total_score	= 0.0;
+			a[n].no_of_bills	= 0;
+
+			a[n].network_stay_days		= 0.0;
+			a[n].nt_work_stay			= 0.0;                  
+			a[n].network_stay_points	= 0.0;
+
+			a[n].bill_no_1[0]	= '\0';
+			a[n].bill_no_2[0]	= '\0';
+			a[n].bill_no_3[0]	= '\0';
+			a[n].bill_no_4[0]	= '\0';
+			a[n].bill_no_5[0]	= '\0';
+			a[n].bill_no_6[0]	= '\0';
+
+			a[n].delay_1= 0.0;
+			a[n].delay_2= 0.0;
+			a[n].delay_3= 0.0;
+			a[n].delay_4= 0.0;
+			a[n].delay_5= 0.0;
+			a[n].delay_6= 0.0;
+
+			a[n].gap_1= 0.0;
+			a[n].gap_2= 0.0;
+			a[n].gap_3= 0.0;
+			a[n].gap_4= 0.0;
+			a[n].gap_5= 0.0;
+			a[n].gap_6= 0.0;
+
+			a[n].tot_pay_1= 0.0;
+			a[n].tot_pay_2= 0.0;
+			a[n].tot_pay_3= 0.0;
+			a[n].tot_pay_4= 0.0;
+			a[n].tot_pay_5= 0.0;
+			a[n].tot_pay_6= 0.0;
+
+			a[n].tot_out_1= 0.0;
+			a[n].tot_out_2= 0.0;
+			a[n].tot_out_3= 0.0;
+			a[n].tot_out_4= 0.0;
+			a[n].tot_out_5= 0.0;
+			a[n].tot_out_6= 0.0;
+
+			a[n].rating_1= 0.0;
+			a[n].rating_2= 0.0;
+			a[n].rating_3= 0.0;
+			a[n].rating_4= 0.0;
+			a[n].rating_5= 0.0;
+			a[n].rating_6= 0.0;
+	}
+
+
+	for(int i=0; i<rows_to_insert; i++, i_db_insert++)
+	{
+			a[i].account_no		= (*i_db_insert).second.account_no;
+			a[i].cx_type_id		= (*i_db_insert).second.cx_type_id;
+			a[i].score			= (*i_db_insert).second.average_score;
+			a[i].total_score	= (*i_db_insert).second.total_score;
+			a[i].no_of_bills	= (*i_db_insert).second.no_of_bills;
+
+			a[i].network_stay_days		= (*i_db_insert).second.network_stay_days;
+			a[i].nt_work_stay			= (*i_db_insert).second.nt_work_stay;                  
+			a[i].network_stay_points	= (*i_db_insert).second.network_stay_points;
+
+
+			strcpy(a[i].bill_no_1, (*i_db_insert).second.bill_no_1);
+			strcpy(a[i].bill_no_2, (*i_db_insert).second.bill_no_2);
+			strcpy(a[i].bill_no_3, (*i_db_insert).second.bill_no_3);
+			strcpy(a[i].bill_no_4, (*i_db_insert).second.bill_no_4);
+			strcpy(a[i].bill_no_5, (*i_db_insert).second.bill_no_5);
+			strcpy(a[i].bill_no_6, (*i_db_insert).second.bill_no_6);
+
+
+			a[i].delay_1	= (*i_db_insert).second.delay_1;
+			a[i].delay_2	= (*i_db_insert).second.delay_2;
+			a[i].delay_3	= (*i_db_insert).second.delay_3;
+			a[i].delay_4	= (*i_db_insert).second.delay_4;
+			a[i].delay_5	= (*i_db_insert).second.delay_5;
+			a[i].delay_6	= (*i_db_insert).second.delay_6;
+
+			a[i].gap_1		= (*i_db_insert).second.gap_1;
+			a[i].gap_2		= (*i_db_insert).second.gap_2;
+			a[i].gap_3		= (*i_db_insert).second.gap_3;
+			a[i].gap_4		= (*i_db_insert).second.gap_4;
+			a[i].gap_5		= (*i_db_insert).second.gap_5;
+			a[i].gap_6		= (*i_db_insert).second.gap_6;
+
+			a[i].tot_pay_1	= (*i_db_insert).second.tot_pay_1;
+			a[i].tot_pay_2	= (*i_db_insert).second.tot_pay_2;
+			a[i].tot_pay_3	= (*i_db_insert).second.tot_pay_3;
+			a[i].tot_pay_4	= (*i_db_insert).second.tot_pay_4;
+			a[i].tot_pay_5	= (*i_db_insert).second.tot_pay_5;
+			a[i].tot_pay_6	= (*i_db_insert).second.tot_pay_6;
+
+			a[i].tot_out_1	= (*i_db_insert).second.tot_out_1;
+			a[i].tot_out_2	= (*i_db_insert).second.tot_out_2;
+			a[i].tot_out_3	= (*i_db_insert).second.tot_out_3;
+			a[i].tot_out_4	= (*i_db_insert).second.tot_out_4;
+			a[i].tot_out_5	= (*i_db_insert).second.tot_out_5;
+			a[i].tot_out_6	= (*i_db_insert).second.tot_out_6;
+
+			a[i].rating_1	= (*i_db_insert).second.rating_1;
+			a[i].rating_2	= (*i_db_insert).second.rating_2;
+			a[i].rating_3	= (*i_db_insert).second.rating_3;
+			a[i].rating_4	= (*i_db_insert).second.rating_4;
+			a[i].rating_5	= (*i_db_insert).second.rating_5;
+			a[i].rating_6	= (*i_db_insert).second.rating_6;
+	} 
+
+
+	EXEC SQL  AT customer_care  FOR :rows_to_insert  INSERT INTO CX_PROFILED_DETAILS (
+			ACCOUNT_NO,
+			CX_TYPE_ID,
+			SCORE,
+			TOTAL_SCORE,
+			NO_OF_BILLS,
+			network_stay_days,
+			nt_work_stay,                  
+			network_stay_points,
+			bill_no_1,
+			bill_no_2,
+			bill_no_3,
+			bill_no_4,
+			bill_no_5,
+			bill_no_6,
+			delay_1,
+			delay_2,
+			delay_3,
+			delay_4,
+			delay_5,
+			delay_6,
+			gap_1,
+			gap_2,
+			gap_3,
+			gap_4,
+			gap_5,
+			gap_6,
+			tot_pay_1,
+			tot_pay_2,
+			tot_pay_3,
+			tot_pay_4,
+			tot_pay_5,
+			tot_pay_6,
+			tot_out_1,
+			tot_out_2,
+			tot_out_3,
+			tot_out_4,
+			tot_out_5,
+			tot_out_6,
+			rating_1,
+			rating_2,
+			rating_3,
+			rating_4,
+			rating_5,
+			rating_6
+	) VALUES (:a);
+
+	EXEC SQL AT customer_care  COMMIT;
+	delete a;
+}
+
+void churn::db_update_billenq_tab()
+{
+	printf("\n updating billenq_tab \n ");
+
+	cout << "rows to update = " << billenq_db_map.size() << endl;
+
+	int	rows_inserted = 0;
+
+	EXEC SQL BEGIN DECLARE SECTION;
+
+		char	row_id[BUF_LEN];
+		//char	billenq_mob_num[BUF_LEN];		// varchar2(10)	- NN
+		char	billenq_acct_num[BUF_LEN];		// varchar2(10)	- NN
+		//char	billenq_pin[BUF_LEN];			// varchar2(6)	- NN
+		char	billenq_current[BUF_LEN];		// varchar2(15)
+		char	billenq_outstand[BUF_LEN];		// varchar2(15)
+		char	billenq_last_update[BUF_LEN];	// varchar2(14)
+		char	billenq_last_billamt[BUF_LEN];	// varchar2(15)
+		char	billenq_last_billdate[BUF_LEN];	// varchar2(14)
+		char	billenq_last_payamt[BUF_LEN];	// varchar2(15)
+		char	billenq_last_paymode[BUF_LEN];	// varchar2(3)
+		char	billenq_last_paydate[BUF_LEN];	// varchar2(14)
+		//char	billenq_lang[BUF_LEN];			// varchar2(1)
+		char	billenq_min_payment[BUF_LEN];	// varchar2(15)
+		char	billenq_con_type[BUF_LEN];		// varchar2(1)
+	
+	EXEC SQL END DECLARE SECTION;
+
+	for(BILLENQ_DEF::iterator i_db_insert =billenq_db_map.begin(); i_db_insert!=billenq_db_map.end(); i_db_insert++)
+	{
+		strncpy(row_id,					( (*i_db_insert).second.row_id).c_str(), 18 );
+		//strncpy(billenq_mob_num,		( (*i_db_insert).second.billenq_mob_num).c_str(), 10 );
+		strncpy(billenq_acct_num,		( (*i_db_insert).second.billenq_acct_num).c_str(), 10 );
+		//strncpy(billenq_pin,			( (*i_db_insert).second.billenq_pin).c_str(), 6 );
+		strncpy(billenq_current,		( (*i_db_insert).second.billenq_current).c_str(), 15 );
+		strncpy(billenq_outstand,		( (*i_db_insert).second.billenq_outstand).c_str(), 15 );
+		strncpy(billenq_last_update,	( (*i_db_insert).second.billenq_last_update).c_str(), 14 );
+		strncpy(billenq_last_billamt,	( (*i_db_insert).second.billenq_last_billamt).c_str(), 15 );
+		strncpy(billenq_last_billdate,	( (*i_db_insert).second.billenq_last_billdate).c_str(), 10 );
+		strncpy(billenq_last_payamt,	( (*i_db_insert).second.billenq_last_payamt).c_str(), 15 );
+		strncpy(billenq_last_paymode,	( (*i_db_insert).second.billenq_last_paymode).c_str(), 3 );
+		strncpy(billenq_last_paydate,	( (*i_db_insert).second.billenq_last_paydate).c_str(), 10 );
+		//strncpy(billenq_lang,			( (*i_db_insert).second.billenq_lang).c_str(), 1 );
+		strncpy(billenq_min_payment,	( (*i_db_insert).second.billenq_min_payment).c_str(), 15 );
+		strncpy(billenq_con_type,		( (*i_db_insert).second.billenq_con_type).c_str(), 1 );
+
+		
+		row_id[18]				='\0';
+		//billenq_mob_num[10]	='\0';
+		billenq_acct_num[10]	='\0';
+		//billenq_pin[6]		='\0';
+		billenq_current[15]		='\0';
+		billenq_outstand[15]	='\0';
+		billenq_last_update[14]	='\0';
+		billenq_last_billamt[15]='\0';
+		billenq_last_billdate[10]='\0';
+		billenq_last_payamt[15]	='\0';
+		billenq_last_paymode[3]	='\0';
+		billenq_last_paydate[10]='\0';
+		//billenq_lang[1]		='\0';
+		billenq_min_payment[15]	='\0';
+		billenq_con_type[1]		='\0';
+
+
+		EXEC SQL 
+		AT customer_care 
+		UPDATE  BILLENQ_TAB
+		//UPDATE  BILLENQ_TAB_TEST
+		SET
+			//BILLENQ_MOB_NUM			= :billenq_mob_num, 
+			BILLENQ_ACCT_NUM		= :billenq_acct_num, 
+			//BILLENQ_PIN				= :billenq_pin, 
+			BILLENQ_CURRENT			= :billenq_current, 
+			BILLENQ_OUTSTAND		= :billenq_outstand, 
+			BILLENQ_LAST_UPDATE		= :billenq_last_update, 
+			BILLENQ_LAST_BILLAMT	= :billenq_last_billamt, 
+			BILLENQ_LAST_BILLDATE	= :billenq_last_billdate, 
+			BILLENQ_LAST_PAYAMT		= :billenq_last_payamt, 
+			BILLENQ_LAST_PAYMODE	= :billenq_last_paymode, 
+			BILLENQ_LAST_PAYDATE	= :billenq_last_paydate, 
+			//BILLENQ_LANG			= :billenq_lang, 
+			BILLENQ_MIN_PAYMENT		= :billenq_min_payment 
+		WHERE
+		  ROWID = :row_id;
+
+		rows_inserted++;
+		if( !(rows_inserted%500))
+		{
+			EXEC SQL AT customer_care  COMMIT;
+		}
+	}
+
+	EXEC SQL AT customer_care  COMMIT;
+	
+	printf("billenq_tab updated ");
+}
+
+//-- truncate billenq_tab
+void churn::db_truncate_billenq_tab()
+{
+	printf("truncating billenq_tab");
+	
+    EXEC SQL 
+	AT customer_care 
+	TRUNCATE TABLE BILLENQ_TAB;				
+			
+	printf("\n billenq_tab truncated");
+}
+
+//-- truncate CX_PROFILED_CUSTOMERS
+void churn::db_truncate_cx_profiled_customers()
+{
+	printf("truncating CX_PROFILED_CUSTOMERS");
+	
+    EXEC SQL 
+	AT customer_care 
+	TRUNCATE TABLE CX_PROFILED_CUSTOMERS;				
+			
+	printf("\n CX_PROFILED_CUSTOMERS truncated");
+}
+
+void churn::db_truncate_cx_profiled_details()
+{
+	printf("truncating CX_PROFILED_DETAILS");
+	
+    EXEC SQL 
+	AT customer_care 
+	TRUNCATE TABLE CX_PROFILED_DETAILS;				
+			
+	printf("\n CX_PROFILED_DETAILS truncated");
+}
+
+
+
+double churn::get_reminder_balance(int contract_id)
+{
+	EXEC SQL BEGIN DECLARE SECTION;
+
+		//float	b_min_payment;
+		int		b_contract_id;		// number(10)
+	
+	EXEC SQL END DECLARE SECTION;
+
+	b_contract_id	= contract_id;
+
+/*
+	EXEC SQL AT customer_care
+	EXECUTE
+	BEGIN
+	:b_min_payment := FB_BILL_TRAN_API.GET_INTERIM_BALANCE(:b_contract_id);
+	END;
+	END-EXEC;
+
+	*/
+
+	//return b_min_payment;
+	return 0;
+}
+
+
+
+
+double churn::get_interim_balance(int contract_id)
+{
+	EXEC SQL BEGIN DECLARE SECTION;
+
+		//float	b_min_payment;
+		int		b_contract_id;		// number(10)
+	
+	EXEC SQL END DECLARE SECTION;
+
+	b_contract_id	= contract_id;
+
+/*
+	EXEC SQL AT customer_care
+	EXECUTE
+	BEGIN
+	:b_min_payment := FB_BILL_TRAN_API.GET_INTERIM_BALANCE(:b_contract_id);
+	END;
+	END-EXEC;
+*/
+	//return b_min_payment;
+	return 0;
+}
+
+
+float churn::db_first_minus_second(char* first_date, char* second_date)
+{
+	// YYYYMMDDHH24MISS
+
+	EXEC SQL BEGIN DECLARE SECTION;
+
+	char	b_first_date[20];			
+	char	b_second_date[20];		
+	float	b_difference;				
+	EXEC SQL END DECLARE SECTION;
+
+	strcpy(b_first_date, first_date);
+	strcpy(b_second_date, second_date);
+	//b_difference = 0;
+	
+	
+	EXEC SQL
+	AT customer_care
+	SELECT to_date(:b_first_date,'YYYYMMDDHH24MISS') - to_date(:b_second_date,'YYYYMMDDHH24MISS')
+	INTO	:b_difference	
+	FROM DUAL;
+
+	//cout << b_difference << endl;
+	
+	return b_difference;
+
+}
+
+
+//++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+void churn::db_read_prov_switch_image()
+{
+	EXEC SQL BEGIN DECLARE SECTION;
+
+	struct psi_t
+	{ 
+		int		image_id;							// number(10)
+		char	imsi_no[BUF_LEN];					// varchar2(15)
+		char	conn_type[BUF_LEN];					// varchar2(10)
+		char	status_reason_id[BUF_LEN];			// varchar2(5)
+		char	switch_status[BUF_LEN];				// varchar2(2)
+	} *a;
+
+	struct psi_ind
+	{ 
+ 		short	image_id_ind;
+		short	imsi_no_ind;
+		short	conn_type_ind;
+		short	status_reason_id_ind;	
+		short	switch_status_ind;		
+	}a_ind[FETCH_SIZE];
+
+	int rows_to_fetch, rows_before, rows_this_time;
+
+EXEC SQL END DECLARE SECTION;
+
+	int i;
+
+	rows_to_fetch = FETCH_SIZE;		// number of rows in each "batch"  
+	rows_before = 0;				   // previous value of sqlerrd[2]   
+	rows_this_time = FETCH_SIZE; 
+
+	if((a = new psi_t[rows_to_fetch])==NULL)
+	{
+		cout<<" cant allocate memory for prov_switch_image fetch"<<endl;
+		exit(0);
+	}
+
+ 
+	EXEC SQL 
+	AT customer_care 
+	DECLARE  c_psi CURSOR FOR 
+	SELECT	IMAGE_ID,
+			IMSI_NO,
+			CONN_TYPE,
+			STATUS_REASON_ID,
+			SWITCH_STATUS
+	FROM	PROV_SWITCH_IMAGE;
+
+ 
+	EXEC SQL AT customer_care  OPEN c_psi; 
+	EXEC SQL WHENEVER NOT FOUND CONTINUE; 
+
+	while (rows_this_time == rows_to_fetch) 
+	{ 
+		EXEC SQL AT customer_care FOR :rows_to_fetch FETCH c_psi INTO :a INDICATOR :a_ind; 		 
+
+		rows_this_time = sqlca.sqlerrd[2] - rows_before; 
+		rows_before = sqlca.sqlerrd[2]; 
+//		printf(" this=%d before=%d \n", rows_this_time, rows_before);
+		printf(" prov_switch_image=%d \n", rows_before);
+
+		
+
+		
+		for(i=0; i<rows_this_time; i++)
+		{
+
+			//handling null fetches
+
+			a[i].image_id = (a_ind[i].image_id_ind < 0) ? 0 : a[i].image_id;
+			strcpy(a[i].imsi_no,
+				  ((a_ind[i].imsi_no_ind < 0) ? "UNDEF":a[i].imsi_no));
+			strcpy(a[i].conn_type,
+				  ((a_ind[i].conn_type_ind < 0) ? "UNDEF":a[i].conn_type));
+			strcpy(a[i].status_reason_id,
+				  ((a_ind[i].status_reason_id_ind < 0) ? "UNDEF":a[i].status_reason_id));
+			strcpy(a[i].switch_status,
+				  ((a_ind[i].switch_status_ind < 0) ? "UNDEF":a[i].switch_status));
+			
+			if ( ( strncmp(a[i].conn_type, "VOICEPRE", 8) != 0 ) && ( strncmp(a[i].switch_status, "D", 1) != 0 ) )
+			//if ( strncmp(a[i].switch_status, "D", 1) != 0 )
+			{
+
+				bd_image_map.insert(BD_IMAGE_DEF::value_type(a[i].imsi_no, a[i].image_id));
+
+			}
+		}
+	} 
+
+	EXEC SQL AT customer_care CLOSE c_psi; 
+	delete a;
+	printf("%d  prov_switch_image data read.\n\n",rows_before);
+}
+
+
+void churn::db_read_dyn_1_connection()	// Validate columns
+{
+	EXEC SQL BEGIN DECLARE SECTION;
+
+	struct connection_t
+	{ 
+		char	imsi[BUF_LEN];			// varchar2(20)
+		int		connection_id;			// number(10)
+		int		service_id;				// number(3)		NN
+	} *a;
+
+	struct connection_ind
+	{ 
+		short	imsi_ind;
+  		short	connection_id_ind;				
+		short	service_id_ind;		
+	}a_ind[FETCH_SIZE];
+
+	int rows_to_fetch, rows_before, rows_this_time;
+
+	EXEC SQL END DECLARE SECTION;
+
+	int i;
+	rows_to_fetch = FETCH_SIZE;		// number of rows in each "batch"  
+	rows_before = 0;				   // previous value of sqlerrd[2]   
+	rows_this_time = FETCH_SIZE; 
+
+	if((a = new connection_t[rows_to_fetch])==NULL)
+	{
+		cout<<" cant allocate memeory for dyn_1_connection fetch"<<endl;
+		exit(0);
+	}
+
+ 
+	EXEC SQL 
+	AT customer_care 
+	DECLARE  c_conn CURSOR FOR 
+	SELECT	IMSI,
+			CONNECTION_ID,
+			SERVICE_ID
+	FROM	DYN_1_CONNECTION
+	WHERE	SERVICE_ID in(1,2,3);
+
+	EXEC SQL AT customer_care  OPEN c_conn; 
+	EXEC SQL WHENEVER NOT FOUND CONTINUE; 
+
+	while (rows_this_time == rows_to_fetch) 
+	{ 
+		EXEC SQL AT customer_care FOR :rows_to_fetch FETCH c_conn INTO :a INDICATOR :a_ind; 		 
+
+		rows_this_time = sqlca.sqlerrd[2] - rows_before; 
+		rows_before = sqlca.sqlerrd[2]; 
+//		printf(" this=%d before=%d \n", rows_this_time, rows_before);
+		printf(" dyn_1_connection=%d \n", rows_before);
+
+		for(i=0; i<rows_this_time; i++)
+		{
+
+			//handling null fetches
+
+			strcpy(a[i].imsi,
+				  ((a_ind[i].imsi_ind < 0) ? "UNDEF":a[i].imsi));
+			a[i].connection_id = (a_ind[i].connection_id_ind < 0) ? 0 : a[i].connection_id;
+			a[i].service_id = (a_ind[i].service_id_ind < 0) ? 0 : a[i].service_id;
+
+						
+			bd_connection_map.insert(BD_CONNECTION_TO_IMSI_DEF::value_type(a[i].connection_id, a[i].imsi));
+		}
+	}
+	
+	EXEC SQL AT customer_care CLOSE c_conn; 
+	delete a;
+	printf("%d  dyn_1_connection data read.\n\n",rows_before);
+}
+
+
+void churn::db_read_cam_connection()
+{
+	EXEC SQL BEGIN DECLARE SECTION;
+
+	struct connection_t
+	{ 
+		int		connection_id;						// number(10) - NN
+		int		package_contract_id;				// number(10)
+	} *a;
+
+	struct connection_ind
+	{ 
+		short	connection_id_ind;
+		short	package_contract_id_ind;					
+	}a_ind[FETCH_SIZE];
+
+	int rows_to_fetch, rows_before, rows_this_time;
+
+EXEC SQL END DECLARE SECTION;
+
+	int i;
+ 
+	rows_to_fetch = FETCH_SIZE;		// number of rows in each "batch"  
+	rows_before = 0;				   // previous value of sqlerrd[2]   
+	rows_this_time = FETCH_SIZE; 
+
+	if((a = new connection_t[rows_to_fetch])==NULL)
+	{
+		cout<<" cant allocate memory for cam_connection fetch"<<endl;
+		exit(0);
+	}
+
+ 
+	EXEC SQL 
+	AT customer_care 
+	DECLARE  c_connection CURSOR FOR 
+	SELECT	CONNECTION_ID,
+			PACKAGE_CONTRACT_ID 
+	FROM	CAM_CONNECTION;
+
+ 
+	EXEC SQL AT customer_care  OPEN c_connection; 
+	EXEC SQL WHENEVER NOT FOUND CONTINUE; 
+
+	
+	while (rows_this_time == rows_to_fetch) 
+	{ 
+		EXEC SQL AT customer_care FOR :rows_to_fetch FETCH c_connection INTO :a INDICATOR :a_ind; 		 
+
+		rows_this_time = sqlca.sqlerrd[2] - rows_before; 
+		rows_before = sqlca.sqlerrd[2]; 
+//		printf(" this=%d before=%d \n", rows_this_time, rows_before);
+		printf(" cam_connection=%d \n", rows_before);
+
+		for(i=0; i<rows_this_time; i++)
+		{
+
+			//handling null fetches
+
+			a[i].connection_id = (a_ind[i].connection_id_ind < 0) ? 0 : a[i].connection_id;
+			a[i].package_contract_id = (a_ind[i].package_contract_id_ind < 0) ? 0 : a[i].package_contract_id;
+			
+		}
+	} 
+
+	EXEC SQL AT customer_care CLOSE c_connection; 
+	delete a;
+	printf("%d  cam_connection data read.\n\n",rows_before);
+}
+
+void churn::db_read_cam_contract_package()
+{
+	EXEC SQL BEGIN DECLARE SECTION;
+
+	struct contract_package_t
+	{ 
+		int		contract_package_id;					// number(10) - NN
+		int		contract_id;							// number(10)
+		char	status[BUF_LEN];						// varchar2(2) - NN
+		char	original_package_start_date[BUF_LEN];	// date
+		char	start_date[BUF_LEN];					// date		- NN
+	} *a;
+
+	struct contract_package_ind
+	{ 
+		short	contract_package_id_ind;					
+		short	contract_id_ind;							
+		short	status_ind;
+		short	original_package_start_date_ind;
+		short	start_date_ind;									
+	}a_ind[FETCH_SIZE];
+
+	int rows_to_fetch, rows_before, rows_this_time;
+
+	EXEC SQL END DECLARE SECTION;
+
+	int i;
+	rows_to_fetch = FETCH_SIZE;		// number of rows in each "batch"  
+	rows_before = 0;				   // previous value of sqlerrd[2]   
+	rows_this_time = FETCH_SIZE; 
+
+	if((a = new contract_package_t[rows_to_fetch])==NULL)
+	{
+		cout<<" cant allocate memeory for cam_contract_package fetch"<<endl;
+		exit(0);
+	}
+
+ 
+	EXEC SQL 
+	AT customer_care 
+	DECLARE  c_ccp CURSOR FOR 
+	SELECT	CONTRACT_PACKAGE_ID, 
+		  CONTRACT_ID, 
+		  STATUS,
+		  ORIGINAL_PACKAGE_START_DATE,
+		  START_DATE 
+	FROM	CAM_CONTRACT_PACKAGE;
+
+	EXEC SQL AT customer_care  OPEN c_ccp; 
+	EXEC SQL WHENEVER NOT FOUND CONTINUE; 
+
+	network_stay	ns;
+	network_stay	*p_ns;
+	reng_date_time	rdt;
+
+	NETWORK_STAY_DEF::iterator i_ns;
+		
+	while (rows_this_time == rows_to_fetch) 
+	{ 
+		EXEC SQL AT customer_care FOR :rows_to_fetch FETCH c_ccp INTO :a INDICATOR :a_ind; 		 
+
+		rows_this_time = sqlca.sqlerrd[2] - rows_before; 
+		rows_before = sqlca.sqlerrd[2]; 
+//		printf(" this=%d before=%d \n", rows_this_time, rows_before);
+		printf(" cam_contract_package =%d \n", rows_before);
+
+		for(i=0; i<rows_this_time; i++)
+		{
+			//handling null fetches
+
+			a[i].contract_id = (a_ind[i].contract_id_ind < 0) ? 0 : a[i].contract_id;
+			strcpy(a[i].status,
+				  ((a_ind[i].status_ind < 0) ? "UNDEF":a[i].status));
+
+
+			/*
+			strcpy(a[i].original_package_start_date,
+				  ((a_ind[i].original_package_start_date_ind < 0) ? "20500101000000":a[i].original_package_start_date));
+			*/
+			
+			strcpy(a[i].start_date,
+				  ((a_ind[i].start_date_ind < 0) ? "20100101000000":a[i].start_date));
+			
+
+			if ( ( i_ns = network_stay_map.find(a[i].contract_id) ) == network_stay_map.end() )
+			{
+				ns.init();
+									
+				if (a_ind[i].original_package_start_date_ind < 0)
+				{
+					// original_package_start_date is null
+					// hence getting start_date
+
+					a[i].start_date[14] = '\0';
+					ns.start_date_rdt.set_date_time(a[i].start_date);
+				}
+				else
+				{
+					a[i].original_package_start_date[14] = '\0';
+					ns.start_date_rdt.set_date_time(a[i].original_package_start_date); 
+				}
+							
+				network_stay_map.insert(NETWORK_STAY_DEF::value_type(a[i].contract_id, ns));
+			}
+			else
+			{
+				p_ns = &(i_ns)->second;
+
+				rdt.date.init();
+				rdt.time.init();
+
+				if (a_ind[i].original_package_start_date_ind < 0)
+				{
+					// original_package_start_date is null
+					// hence getting start_date
+
+					a[i].start_date[14] = '\0';
+					rdt.set_date_time(a[i].start_date);
+				}
+				else
+				{
+					a[i].original_package_start_date[14] = '\0';
+					rdt.set_date_time(a[i].original_package_start_date);
+				} 
+
+				if ( rdt < (*i_ns).second.start_date_rdt )
+				{
+					p_ns->start_date_rdt	= rdt;
+				
+				}
+			}
+		}
+	}
+	
+	EXEC SQL AT customer_care CLOSE c_ccp; 
+	delete a;
+	printf("%d  cam_contract_package data read.\n\n",rows_before);
+}
+
+
+void churn::db_read_cam_contract()
+{
+	EXEC SQL BEGIN DECLARE SECTION;
+
+	struct contract_t
+	{ 
+		int		contract_id;							// number(10) - NN
+		int		subscriber_node_id;						// number(10) - NN
+		char	is_payment_responsible[BUF_LEN];		// varchar2(1)
+		float	credit_limit;							// number(11,2)
+		char	contract_type[BUF_LEN];					// varchar2(5) - NN
+		char	status[BUF_LEN];						// varchar2(2) - NN
+	} *a;
+
+	struct contract_ind
+	{ 
+		short	contract_id_ind;							
+		short	subscriber_node_id_ind;						
+		short	is_payment_responsible_ind;		
+		short	credit_limit_ind;							
+		short	contract_type_ind;					
+		short	status_ind;						
+	}a_ind[FETCH_SIZE];
+
+	int rows_to_fetch, rows_before, rows_this_time;
+
+EXEC SQL END DECLARE SECTION;
+
+	int i;
+ 
+	rows_to_fetch = FETCH_SIZE;		// number of rows in each "batch"  
+	rows_before = 0;				   // previous value of sqlerrd[2]   
+	rows_this_time = FETCH_SIZE; 
+
+	if((a = new contract_t[rows_to_fetch])==NULL)
+	{
+		cout<<" cant allocate memory for cam_contract fetch"<<endl;
+		exit(0);
+	}
+
+ 
+	EXEC SQL 
+	AT customer_care 
+	DECLARE  c_contract CURSOR FOR 
+	SELECT	CONTRACT_ID, 
+			  SUBSCRIBER_NODE_ID, 
+			  IS_PAYMENT_RESPONSIBLE, 
+			  CREDIT_LIMIT, 
+			  CONTRACT_TYPE, 
+			  STATUS 
+	FROM	CAM_CONTRACT;
+
+ 
+	EXEC SQL AT customer_care  OPEN c_contract; 
+	EXEC SQL WHENEVER NOT FOUND CONTINUE; 
+
+	cam_contract cc;
+	
+	while (rows_this_time == rows_to_fetch) 
+	{ 
+		EXEC SQL AT customer_care FOR :rows_to_fetch FETCH c_contract INTO :a INDICATOR :a_ind; 		 
+
+		rows_this_time = sqlca.sqlerrd[2] - rows_before; 
+		rows_before = sqlca.sqlerrd[2]; 
+//		printf(" this=%d before=%d \n", rows_this_time, rows_before);
+		printf(" cam_contract=%d \n", rows_before);
+
+		for(i=0; i<rows_this_time; i++)
+		{
+
+			//handling null fetches
+
+			a[i].contract_id = (a_ind[i].contract_id_ind < 0) ? 0 : a[i].contract_id;
+			a[i].subscriber_node_id = (a_ind[i].subscriber_node_id_ind < 0) ? 0 : a[i].subscriber_node_id;
+
+			strcpy(a[i].is_payment_responsible,
+				  ((a_ind[i].is_payment_responsible_ind < 0) ? "UNDEF":a[i].is_payment_responsible));
+			a[i].credit_limit = (a_ind[i].credit_limit_ind < 0) ? 0 : a[i].credit_limit;
+			strcpy(a[i].contract_type,
+				  ((a_ind[i].contract_type_ind < 0) ? "UNDEF":a[i].contract_type));
+			strcpy(a[i].status,
+				  ((a_ind[i].status_ind < 0) ? "UNDEF":a[i].status));
+
+			cc.init();
+
+			cc.contract_id				= a[i].contract_id;							
+			cc.subscriber_node_id		= a[i].subscriber_node_id;						
+			cc.is_payment_responsible	= a[i].is_payment_responsible;	
+			cc.credit_limit				= a[i].credit_limit;							
+			cc.contract_type			= a[i].contract_type;							
+			cc.status					= a[i].status;									
+
+			cam_contract_map.insert(CONTRACT_DEF::value_type(a[i].contract_id, cc));
+		}
+	} 
+
+	EXEC SQL AT customer_care CLOSE c_contract; 
+	delete a;
+	printf("%d  cam_contract data read.\n\n",rows_before);
+}
+
+/*
+CREATE TABLE BILL_PERIOD_TRANSACTION_MASTER ( 
+  NODE_ID              NUMBER (10)   NOT NULL, 
+  NODE_TYPE            VARCHAR2 (1)  NOT NULL, 
+  BILL_NUMBER          VARCHAR2 (20)  NOT NULL, 
+  START_DATE           DATE, 
+  END_DATE             DATE, 
+  CLOSED_DATE          DATE, 
+  BROUGHT_FWD          NUMBER (14,2), 
+  BILL_AMOUNT          NUMBER (14,2), 
+  PERIOD_PAYMENTS      NUMBER (14,2), 
+  CARRIED_FWD          NUMBER (14,2), 
+  DUE_DATE             DATE, 
+  PERIOD_OVERPAYMENTS  NUMBER (14,2), 
+  */
+
+/*
+void churn::db_read_bill_period_transaction_master()
+{
+
+
+	EXEC SQL BEGIN DECLARE SECTION;
+
+	struct bill_transactions_t
+	{
+		int		node_id;					// number(10)	NN
+		char	bill_number[BUF_LEN];		// varchar2(20)	NN
+		//float	carried_fwd;				// number(14,2)
+		char	start_date[BUF_LEN];		// date
+		char	end_date[BUF_LEN];			// date
+		char	due_date[BUF_LEN];			// date
+	} *a;
+
+	struct bill_transactions_ind
+	{ 
+		short	node_id_ind;
+  		short	bill_number_ind;				
+		//short	carried_fwd_ind;
+		short	start_date_ind;
+		short	end_date_ind;
+		short	due_date_ind;
+	}a_ind[FETCH_SIZE];
+
+	int rows_to_fetch, rows_before, rows_this_time;
+	
+	EXEC SQL END DECLARE SECTION;
+
+	int i;
+	rows_to_fetch = FETCH_SIZE;		// number of rows in each "batch"  
+	rows_before = 0;				   // previous value of sqlerrd[2]   
+	rows_this_time = FETCH_SIZE; 
+
+	if((a = new bill_transactions_t[rows_to_fetch])==NULL)
+	{
+		cout<<" cant allocate memeory for bill_period_transaction_master fetch"<<endl;
+		exit(0);
+	}
+
+ 
+	EXEC SQL 
+	AT customer_care 
+	DECLARE  c_transaction_master CURSOR FOR 
+	SELECT	NODE_ID,	
+			BILL_NUMBER,
+			START_DATE,
+			END_DATE,
+			DUE_DATE
+	FROM	BILL_PERIOD_TRANSACTION_MASTER;
+	//WHERE	TRAN_TYPE = 'BILL';
+
+	EXEC SQL AT customer_care  OPEN c_transaction_master; 
+	EXEC SQL WHENEVER NOT FOUND CONTINUE; 
+
+	//transaction_master tm;
+	//transaction_key tk;
+	//TRANSACTION_MASTER_DEF::iterator i_tm;
+	//reng_date_time rdt;
+	
+	while (rows_this_time == rows_to_fetch) 
+	{ 
+		EXEC SQL AT customer_care FOR :rows_to_fetch FETCH c_transaction_master INTO :a INDICATOR :a_ind; 		 
+
+		rows_this_time = sqlca.sqlerrd[2] - rows_before; 
+		rows_before = sqlca.sqlerrd[2]; 
+//		printf(" this=%d before=%d \n", rows_this_time, rows_before);
+		printf(" bill_period_transaction_master =%d \n", rows_before);
+
+		for(i=0; i<rows_this_time; i++)
+		{
+
+			//handling null fetches
+			//a[i].carried_fwd = (a_ind[i].carried_fwd_ind < 0) ? 0 : a[i].carried_fwd;
+			strcpy(a[i].start_date,
+				  ((a_ind[i].start_date_ind < 0) ? "19490101000000":a[i].start_date));
+			strcpy(a[i].end_date,
+				  ((a_ind[i].end_date_ind < 0) ? "20500101000000":a[i].end_date));
+			strcpy(a[i].due_date,
+				  ((a_ind[i].due_date_ind < 0) ? "20500101000000":a[i].due_date));
+
+
+			transaction_master *tm = new transaction_master;
+			tm->init();
+			
+
+			tm->node_id		= a[i].node_id;	
+			//tm.bill_number	= a[i].bill_number;
+			//tm.carried_fwd	= a[i].carried_fwd;
+
+			a[i].start_date[14] = '\0';
+			tm->start_date_rdt.set_date_time(a[i].start_date); 
+			a[i].end_date[14] = '\0';
+			tm->end_date_rdt.set_date_time(a[i].end_date); 
+			a[i].due_date[14] = '\0';
+			tm->due_date_rdt.set_date_time(a[i].due_date);
+
+			//tm.start_date	= a[i].start_date;
+			//tm.end_date		= a[i].end_date;
+			//tm.due_date		= a[i].due_date;
+			
+			//tk.init();
+			//tk.node_id		= a[i].node_id;	
+			//tk.end_date_rdt.set_date_time(a[i].end_date);  
+		
+								
+			bill_period_transaction_master_map.insert(TRANSACTION_MASTER_DEF::value_type(a[i].bill_number, tm));
+
+			//bill_period_transaction_master_k_map.insert(TRANSACTION_MASTER_K_DEF::value_type(tk, tm));
+			
+		}
+	}
+	
+	EXEC SQL AT customer_care CLOSE c_transaction_master; 
+	delete a;
+	printf("%d  bill_period_transaction_master data read.\n\n",rows_before);
+}
+*/
+
+
+void churn::db_read_bill_period_transaction_master()
+{
+
+
+	EXEC SQL BEGIN DECLARE SECTION;
+
+	struct bill_transactions_t
+	{
+		int		node_id;					// number(10)	NN
+		char	bill_number[BUF_LEN];		// varchar2(20)	NN
+		char	start_date[BUF_LEN];		// date
+		char	end_date[BUF_LEN];			// date
+		char	due_date[BUF_LEN];			// date
+	} *a;
+
+	struct bill_transactions_ind
+	{ 
+		short	node_id_ind;
+  		short	bill_number_ind;				
+		short	start_date_ind;
+		short	end_date_ind;
+		short	due_date_ind;
+	}a_ind[FETCH_SIZE];
+
+	int rows_to_fetch, rows_before, rows_this_time;
+	
+	EXEC SQL END DECLARE SECTION;
+
+	int i;
+	rows_to_fetch = FETCH_SIZE;		// number of rows in each "batch"  
+	rows_before = 0;				   // previous value of sqlerrd[2]   
+	rows_this_time = FETCH_SIZE; 
+
+	if((a = new bill_transactions_t[rows_to_fetch])==NULL)
+	{
+		cout<<" cant allocate memeory for bill_period_transaction_master fetch"<<endl;
+		exit(0);
+	}
+
+ 
+	EXEC SQL 
+	AT customer_care 
+	DECLARE  c_transaction_master CURSOR FOR 
+	SELECT	NODE_ID,	
+			BILL_NUMBER,
+			START_DATE,
+			END_DATE,
+			DUE_DATE
+	FROM	BILL_PERIOD_TRANSACTION_MASTER;
+
+	EXEC SQL AT customer_care  OPEN c_transaction_master; 
+	EXEC SQL WHENEVER NOT FOUND CONTINUE; 
+
+	
+	while (rows_this_time == rows_to_fetch) 
+	{ 
+		EXEC SQL AT customer_care FOR :rows_to_fetch FETCH c_transaction_master INTO :a INDICATOR :a_ind; 		 
+
+		rows_this_time = sqlca.sqlerrd[2] - rows_before; 
+		rows_before = sqlca.sqlerrd[2]; 
+//		printf(" this=%d before=%d \n", rows_this_time, rows_before);
+		printf(" bill_period_transaction_master =%d \n", rows_before);
+
+		for(i=0; i<rows_this_time; i++)
+		{
+
+			//handling null fetches
+
+			/*
+			strcpy(a[i].start_date,
+				  ((a_ind[i].start_date_ind < 0) ? "19490101000000":a[i].start_date));
+			strcpy(a[i].end_date,
+				  ((a_ind[i].end_date_ind < 0) ? "20500101000000":a[i].end_date));
+			strcpy(a[i].due_date,
+				  ((a_ind[i].due_date_ind < 0) ? "20500101000000":a[i].due_date));
+			*/
+
+			if ( (a_ind[i].start_date_ind < 0) || (a_ind[i].end_date_ind < 0) || (a_ind[i].due_date_ind < 0) )
+			{
+				//cout << "ERROR :start_date, end_date or due_date null in bill_period_transaction_master for " << endl;
+				//cout << "Node Id = " << a[i].node_id << endl;
+				//cout << "bill_number = " << a[i].bill_number << endl;
+
+				// fprintf(log_to_file,"ERROR : start_date, end_date or due_date null in bill_period_transaction_master for Node Id %d, bill number %d|\n",a[i].node_id, a[i].bill_number);
+			}
+			else
+			{
+				transaction_master *tm = new transaction_master;
+				tm->init();
+			
+				tm->node_id		= a[i].node_id;	
+
+
+				a[i].start_date[14] = '\0';
+				tm->start_date_rdt.set_date_time(a[i].start_date); 
+				a[i].end_date[14] = '\0';
+				tm->end_date_rdt.set_date_time(a[i].end_date); 
+				a[i].due_date[14] = '\0';
+				tm->due_date_rdt.set_date_time(a[i].due_date);
+
+								
+				bill_period_transaction_master_map.insert(TRANSACTION_MASTER_DEF::value_type(a[i].bill_number, tm));
+			}
+		}
+	}
+	
+	EXEC SQL AT customer_care CLOSE c_transaction_master; 
+	delete a;
+	printf("%d  bill_period_transaction_master data read.\n\n",rows_before);
+}
+
+
+/*
+CREATE TABLE CX_PAYMENT_DELAY_RISK ( 
+  DELAY_DAYS_FROM     NUMBER (5)    NOT NULL, 
+  DELAY_DAYS_TO       NUMBER (5)    NOT NULL, 
+  PAYMENT_DELAY_RISK  NUMBER (5,4)  NOT NULL))
+
+CREATE TABLE CX_PAYMENT_GAP_RISK ( 
+  PROB_FROM         NUMBER (3,2)  NOT NULL, 
+  PROB_TO           NUMBER (13,2) NOT NULL, 
+  PAYMENT_GAP_RISK  NUMBER (5,4)  NOT NULL))
+
+
+CREATE TABLE CX_NETWORK_STAY_POINTS ( 
+  STAY_YEARS_FROM  NUMBER (3)    NOT NULL, 
+  STAY_YEARS_TO    NUMBER (13)   NOT NULL, 
+  POINTS           NUMBER (5,2)  NOT NULL))
+
+
+CREATE TABLE CX_CREDIT_RATINGS ( 
+  CREDIT_RATING_ID  NUMBER (5)    NOT NULL, 
+  DESCRIPTION       VARCHAR2 (20), 
+  PROB_FROM         NUMBER (3,2)  NOT NULL, 
+  PROB_TO           NUMBER (13,2) NOT NULL)
+
+cx_profiled_customers
+
+account_no numner NN - PK
+cx_type_id	number
+score		NUMBER(14,4)
+
+
+
+CREATE TABLE CX_PROFILED_DETAILS (
+         ACCOUNT_NO            NUMBER(10)               NOT NULL,
+         CX_TYPE_ID           NUMBER(10),
+         SCORE                NUMBER(14,4),
+         TOTAL_SCORE          NUMBER(14,4),
+         NO_OF_BILLS          NUMBER(10),
+         NETWORK_STAY_DAYS    NUMBER(14,4),
+         NT_WORK_STAY       NUMBER(14,4),
+         NETWORK_STAY_POINTS    NUMBER(14,4),
+         BILL_NO_1            VARCHAR2(20),
+         BILL_NO_2            VARCHAR2(20),
+         BILL_NO_3            VARCHAR2(20),
+         BILL_NO_4            VARCHAR2(20),
+         BILL_NO_5            VARCHAR2(20),
+         BILL_NO_6            VARCHAR2(20),
+         DELAY_1              NUMBER(14,4),
+         DELAY_2              NUMBER(14,4),
+         DELAY_3              NUMBER(14,4),
+         DELAY_4              NUMBER(14,4),
+         DELAY_5              NUMBER(14,4),
+         DELAY_6              NUMBER(14,4),
+         GAP_1             NUMBER(14,4),
+         GAP_2             NUMBER(14,4),
+         GAP_3             NUMBER(14,4),
+         GAP_4             NUMBER(14,4),
+         GAP_5             NUMBER(14,4),
+         GAP_6             NUMBER(14,4),
+         TOT_PAY_1               NUMBER(14,4),
+         TOT_PAY_2               NUMBER(14,4),
+         TOT_PAY_3               NUMBER(14,4),
+         TOT_PAY_4               NUMBER(14,4),
+         TOT_PAY_5               NUMBER(14,4),
+         TOT_PAY_6               NUMBER(14,4),
+         TOT_OUT_1               NUMBER(14,4),
+         TOT_OUT_2               NUMBER(14,4),
+         TOT_OUT_3               NUMBER(14,4),
+         TOT_OUT_4               NUMBER(14,4),
+         TOT_OUT_5               NUMBER(14,4),
+         TOT_OUT_6               NUMBER(14,4),
+         RATING_1             NUMBER(14,4),
+         RATING_2             NUMBER(14,4),
+         RATING_3             NUMBER(14,4),
+         RATING_4             NUMBER(14,4),
+         RATING_5             NUMBER(14,4),
+         RATING_6             NUMBER(14,4))
+
+
+*/
+
+void churn::db_read_cx_payment_delay_risk()
+{
+	EXEC SQL BEGIN DECLARE SECTION;
+
+	struct delay_t
+	{ 
+		int		delay_days_from;			// number(5) - NN
+		int		delay_days_to;				// number(5) - NN
+		float	payment_delay_risk;			// number(5,4)	- NN
+	} *a;
+
+	struct delay_ind
+	{ 
+		short	delay_days_from_ind;							
+		short	delay_days_to_ind;						
+		short	payment_delay_risk_ind;		
+	}a_ind[FETCH_SIZE];
+
+	int rows_to_fetch, rows_before, rows_this_time;
+
+EXEC SQL END DECLARE SECTION;
+
+	int i;
+ 
+	rows_to_fetch = FETCH_SIZE;		// number of rows in each "batch"  
+	rows_before = 0;				// previous value of sqlerrd[2]   
+	rows_this_time = FETCH_SIZE; 
+
+	if((a = new delay_t[rows_to_fetch])==NULL)
+	{
+		cout<<" cant allocate memory for cx_payment_delay_risk fetch"<<endl;
+		exit(0);
+	}
+
+ 
+	EXEC SQL 
+	AT customer_care 
+	DECLARE  c_delay CURSOR FOR 
+	SELECT	DELAY_DAYS_FROM, 
+			DELAY_DAYS_TO, 
+			PAYMENT_DELAY_RISK 
+	FROM	CX_PAYMENT_DELAY_RISK;
+
+ 
+	EXEC SQL AT customer_care  OPEN c_delay; 
+	EXEC SQL WHENEVER NOT FOUND CONTINUE; 
+
+	delay_key dk;
+	
+	while (rows_this_time == rows_to_fetch) 
+	{ 
+		EXEC SQL AT customer_care FOR :rows_to_fetch FETCH c_delay INTO :a INDICATOR :a_ind; 		 
+
+		rows_this_time = sqlca.sqlerrd[2] - rows_before; 
+		rows_before = sqlca.sqlerrd[2]; 
+//		printf(" this=%d before=%d \n", rows_this_time, rows_before);
+		printf(" cx_payment_delay_risk=%d \n", rows_before);
+
+		for(i=0; i<rows_this_time; i++)
+		{
+
+			//handling null fetches - all NN
+
+			dk.init();
+
+			dk.delay_days_from		= a[i].delay_days_from;		
+			dk.delay_days_to		= a[i].delay_days_to;										
+			
+			delay_map.insert(DELAY_DEF::value_type(dk, a[i].payment_delay_risk));
+		}
+	} 
+
+	EXEC SQL AT customer_care CLOSE c_delay; 
+	delete a;
+	printf("%d  cx_payment_delay_risk data read.\n\n",rows_before);
+}
+
+
+void churn::db_read_cx_payment_gap_risk()
+{
+	EXEC SQL BEGIN DECLARE SECTION;
+
+	struct gap_t
+	{ 
+		float	prob_from;			// number(3,2) - NN
+		float	prob_to;			// number(13,2) - NN
+		float	payment_gap_risk;	// number(5,4)	- NN
+	} *a;
+
+	struct gap_ind
+	{ 
+		short	prob_from_ind;							
+		short	prob_to_ind;						
+		short	payment_gap_risk_ind;		
+	}a_ind[FETCH_SIZE];
+
+	int rows_to_fetch, rows_before, rows_this_time;
+
+EXEC SQL END DECLARE SECTION;
+
+	int i;
+ 
+	rows_to_fetch = FETCH_SIZE;		// number of rows in each "batch"  
+	rows_before = 0;				// previous value of sqlerrd[2]   
+	rows_this_time = FETCH_SIZE; 
+
+	if((a = new gap_t[rows_to_fetch])==NULL)
+	{
+		cout<<" cant allocate memory for cx_payment_gap_risk fetch"<<endl;
+		exit(0);
+	}
+
+ 
+	EXEC SQL 
+	AT customer_care 
+	DECLARE  c_gap CURSOR FOR 
+	SELECT	PROB_FROM, 
+			PROB_TO, 
+			PAYMENT_GAP_RISK 
+	FROM	CX_PAYMENT_GAP_RISK;
+
+ 
+	EXEC SQL AT customer_care  OPEN c_gap; 
+	EXEC SQL WHENEVER NOT FOUND CONTINUE; 
+
+	gap_key gk;
+	
+	while (rows_this_time == rows_to_fetch) 
+	{ 
+		EXEC SQL AT customer_care FOR :rows_to_fetch FETCH c_gap INTO :a INDICATOR :a_ind; 		 
+
+		rows_this_time = sqlca.sqlerrd[2] - rows_before; 
+		rows_before = sqlca.sqlerrd[2]; 
+//		printf(" this=%d before=%d \n", rows_this_time, rows_before);
+		printf(" cx_payment_gap_risk=%d \n", rows_before);
+
+		for(i=0; i<rows_this_time; i++)
+		{
+
+			//handling null fetches - all NN
+
+			gk.init();
+
+			gk.prob_from	= a[i].prob_from;		
+			gk.prob_to		= a[i].prob_to;										
+			
+			gap_map.insert(GAP_DEF::value_type(gk, a[i].payment_gap_risk));
+		}
+	} 
+
+	EXEC SQL AT customer_care CLOSE c_gap; 
+	delete a;
+	printf("%d  cx_payment_gap_risk data read.\n\n",rows_before);
+}
+
+
+void churn::db_read_cx_network_stay_points()
+{
+	EXEC SQL BEGIN DECLARE SECTION;
+
+	struct stay_t
+	{ 
+		int		stay_years_from;			// number(3) - NN
+		int		stay_years_to;				// number(13) - NN
+		float	points;						// number(5,2)	- NN
+	} *a;
+
+	struct stay_ind
+	{ 
+		short	stay_years_from_ind;							
+		short	stay_years_to_ind;						
+		short	points_ind;		
+	}a_ind[FETCH_SIZE];
+
+	int rows_to_fetch, rows_before, rows_this_time;
+
+EXEC SQL END DECLARE SECTION;
+
+	int i;
+ 
+	rows_to_fetch = FETCH_SIZE;		// number of rows in each "batch"  
+	rows_before = 0;				// previous value of sqlerrd[2]   
+	rows_this_time = FETCH_SIZE; 
+
+	if((a = new stay_t[rows_to_fetch])==NULL)
+	{
+		cout<<" cant allocate memory for cx_network_stay_points fetch"<<endl;
+		exit(0);
+	}
+
+ 
+	EXEC SQL 
+	AT customer_care 
+	DECLARE  c_stay CURSOR FOR 
+	SELECT	STAY_YEARS_FROM, 
+			STAY_YEARS_TO, 
+			POINTS 
+	FROM	CX_NETWORK_STAY_POINTS;
+
+ 
+	EXEC SQL AT customer_care  OPEN c_stay; 
+	EXEC SQL WHENEVER NOT FOUND CONTINUE; 
+
+	stay_key sk;
+	
+	while (rows_this_time == rows_to_fetch) 
+	{ 
+		EXEC SQL AT customer_care FOR :rows_to_fetch FETCH c_stay INTO :a INDICATOR :a_ind; 		 
+
+		rows_this_time = sqlca.sqlerrd[2] - rows_before; 
+		rows_before = sqlca.sqlerrd[2]; 
+//		printf(" this=%d before=%d \n", rows_this_time, rows_before);
+		printf(" cx_network_stay_points=%d \n", rows_before);
+
+		for(i=0; i<rows_this_time; i++)
+		{
+
+			//handling null fetches - all NN
+
+			sk.init();
+
+			sk.stay_years_from		= a[i].stay_years_from;		
+			sk.stay_years_to		= a[i].stay_years_to;										
+			
+			stay_map.insert(STAY_DEF::value_type(sk, a[i].points));
+		}
+	} 
+
+	EXEC SQL AT customer_care CLOSE c_stay; 
+	delete a;
+	printf("%d  cx_network_stay_points data read.\n\n",rows_before);
+}
+
+
+void churn::db_read_cx_credit_ratings()
+{
+	EXEC SQL BEGIN DECLARE SECTION;
+
+	struct rating_t
+	{ 
+		float	prob_from;			// number(3,2)	- NN
+		float	prob_to;			// number(13,2) - NN 
+		int		credit_rating_id;	// number(5)	- NN
+	} *a;
+
+	struct rating_ind
+	{ 
+		short	prob_from_ind;							
+		short	prob_to_ind;						
+		short	credit_rating_id_ind;		
+	}a_ind[FETCH_SIZE];
+
+	int rows_to_fetch, rows_before, rows_this_time;
+
+EXEC SQL END DECLARE SECTION;
+
+	int i;
+ 
+	rows_to_fetch = FETCH_SIZE;		// number of rows in each "batch"  
+	rows_before = 0;				// previous value of sqlerrd[2]   
+	rows_this_time = FETCH_SIZE; 
+
+	if((a = new rating_t[rows_to_fetch])==NULL)
+	{
+		cout<<" cant allocate memory for cx_credit_ratings fetch"<<endl;
+		exit(0);
+	}
+
+ 
+	EXEC SQL 
+	AT customer_care 
+	DECLARE  c_rating CURSOR FOR 
+	SELECT	PROB_FROM, 
+			PROB_TO, 
+			CREDIT_RATING_ID 
+	FROM	CX_CREDIT_RATINGS;
+
+ 
+	EXEC SQL AT customer_care  OPEN c_rating; 
+	EXEC SQL WHENEVER NOT FOUND CONTINUE; 
+
+	rating_key rk;
+	
+	while (rows_this_time == rows_to_fetch) 
+	{ 
+		EXEC SQL AT customer_care FOR :rows_to_fetch FETCH c_rating INTO :a INDICATOR :a_ind; 		 
+
+		rows_this_time = sqlca.sqlerrd[2] - rows_before; 
+		rows_before = sqlca.sqlerrd[2]; 
+//		printf(" this=%d before=%d \n", rows_this_time, rows_before);
+		printf(" cx_credit_ratings=%d \n", rows_before);
+
+		for(i=0; i<rows_this_time; i++)
+		{
+
+			//handling null fetches - all NN
+
+			rk.init();
+
+			rk.prob_from	= a[i].prob_from;		
+			rk.prob_to		= a[i].prob_to;										
+			
+			rating_map.insert(RATING_DEF::value_type(rk, a[i].credit_rating_id));
+		}
+	} 
+
+	EXEC SQL AT customer_care CLOSE c_rating; 
+	delete a;
+	printf("%d  cx_credit_ratings data read.\n\n",rows_before);
+}
+
+/* backup 01-09-2010
+void churn::db_read_fb_contract_balances_new()
+{
+	EXEC SQL BEGIN DECLARE SECTION;
+
+	struct bill_transactions_t
+	{
+		int		tran_no;					// number(16)
+		int		contract_id;				// number(10)
+		float	tran_amount;				// number(14,2)
+		float	contract_balance;			// number(14,2)
+		char	tran_date[BUF_LEN];			// date
+		char	tran_type[BUF_LEN];			// varchar2(10)
+		char	tran_reference[BUF_LEN];	// varchar2(20)
+	} *a;
+
+	struct bill_transactions_ind
+	{ 
+		short	tran_no_ind;
+  		short	contract_id_ind;				
+		short	tran_amount_ind;
+		short	contract_balance_ind;
+		short	tran_date_ind;
+		short	tran_type_ind;
+		short	tran_reference_ind;
+	}a_ind[FETCH_SIZE];
+
+	int rows_to_fetch, rows_before, rows_this_time;
+	
+	EXEC SQL END DECLARE SECTION;
+
+	int i;
+	rows_to_fetch = FETCH_SIZE;		// number of rows in each "batch"  
+	rows_before = 0;				   // previous value of sqlerrd[2]   
+	rows_this_time = FETCH_SIZE; 
+
+	if((a = new bill_transactions_t[rows_to_fetch])==NULL)
+	{
+		cout<<" cant allocate memeory for fb_contract_balances fetch"<<endl;
+		exit(0);
+	}
+
+ 
+	EXEC SQL 
+	AT customer_care 
+	DECLARE  c_fb_contract_balances_n CURSOR FOR 
+	SELECT	TRAN_NO,	
+			CONTRACT_ID,
+			TRAN_AMOUNT,
+			CONTRACT_BALANCE,
+			TRAN_DATE,
+			TRAN_TYPE,
+			TRAN_REFERENCE
+	FROM	FB_CONTRACT_BALANCES;
+
+	EXEC SQL AT customer_care  OPEN c_fb_contract_balances_n; 
+	EXEC SQL WHENEVER NOT FOUND CONTINUE; 
+
+	fb_contract_balances		fcb;
+	fb_contract_balances_new	fcbn;
+	
+	bill_key			bk;
+
+	FB_CONTRACT_BALANCES_DEF::iterator i_fcb;
+	
+	while (rows_this_time == rows_to_fetch) 
+	{ 
+		EXEC SQL AT customer_care FOR :rows_to_fetch FETCH c_fb_contract_balances_n INTO :a INDICATOR :a_ind; 		 
+
+		rows_this_time = sqlca.sqlerrd[2] - rows_before; 
+		rows_before = sqlca.sqlerrd[2]; 
+//		printf(" this=%d before=%d \n", rows_this_time, rows_before);
+		printf(" fb_contract_balances =%d \n", rows_before);
+
+		for(i=0; i<rows_this_time; i++)
+		{
+
+			//handling null fetches
+			strcpy(a[i].tran_type,
+				  ((a_ind[i].tran_type_ind < 0) ? "UNDEF":a[i].tran_type));
+			strcpy(a[i].tran_reference,
+				  ((a_ind[i].tran_reference_ind < 0) ? "UNDEF":a[i].tran_reference));
+
+			fcb.init();
+			fcbn.init();
+
+			fcb.tran_amount		= a[i].tran_amount;	
+			fcbn.tran_amount	= a[i].tran_amount;	
+			
+			fcb.tran_no			= a[i].tran_no;
+			fcbn.tran_no		= a[i].tran_no;
+
+			a[i].tran_date[14]	= '\0';
+			fcb.tran_date_rdt.set_date_time(a[i].tran_date); 
+			fcbn.tran_date_rdt.set_date_time(a[i].tran_date); 
+
+			if ( strncmp(a[i].tran_type, "BILL", 4) == 0 )
+			{
+				TRANSACTION_MASTER_DEF::iterator i_tm = bill_period_transaction_master_map.find(a[i].tran_reference);
+
+				if (i_tm == bill_period_transaction_master_map.end() )
+				{
+					//cout << "ERROR :No Bill No in bill_period_transaction_master for " << endl;
+					//cout << "Node Id = " << a[i].contract_id << endl;
+					//cout << "Tran Reference = " << a[i].tran_reference << endl;
+
+					//thushara --> fprintf(log_to_file,"ERROR : Bill No in bill_period_transaction_master for Node Id %d, Tran Reference %d|\n",a[i].contract_id, a[i].tran_reference);
+				}
+				else
+				{
+					fcb.start_date_rdt	= (*i_tm).second->start_date_rdt;
+					fcb.end_date_rdt	= (*i_tm).second->end_date_rdt;
+					fcb.due_date_rdt	= (*i_tm).second->due_date_rdt;
+
+					strcpy(fcb.bill_no, a[i].tran_reference);
+
+					bk.init();
+					bk.node_id		= a[i].contract_id;	
+					bk.end_date_rdt	= (*i_tm).second->end_date_rdt;
+
+					
+					bill_map.insert(BILL_DEF::value_type(bk, fcb));
+				}
+			}
+			else if ( strncmp(a[i].tran_type, "PAY", 3) == 0 )
+			{
+				fb_contract_balances_pay_map.insert(FB_CONTRACT_BALANCES_DEF::value_type(a[i].contract_id, fcbn));
+			}
+
+			fb_contract_balances_map.insert(FB_CONTRACT_BALANCES_DEF::value_type(a[i].contract_id, fcbn));
+		}
+	}
+	
+	EXEC SQL AT customer_care CLOSE c_fb_contract_balances_n; 
+	delete a;
+	printf("%d  fb_contract_balances data read.\n\n",rows_before);
+}
+*/
+
+
+void churn::db_read_fb_contract_balances_new()
+{
+	EXEC SQL BEGIN DECLARE SECTION;
+
+	struct bill_transactions_t
+	{
+		int		tran_no;					// number(16)
+		int		contract_id;				// number(10)
+		float	tran_amount;				// number(14,2)
+		float	contract_balance;			// number(14,2)
+		char	tran_date[BUF_LEN];			// date
+		char	tran_type[BUF_LEN];			// varchar2(10)
+		char	tran_reference[BUF_LEN];	// varchar2(20)
+	} *a;
+
+	struct bill_transactions_ind
+	{ 
+		short	tran_no_ind;
+  		short	contract_id_ind;				
+		short	tran_amount_ind;
+		short	contract_balance_ind;
+		short	tran_date_ind;
+		short	tran_type_ind;
+		short	tran_reference_ind;
+	}a_ind[FETCH_SIZE];
+
+	int rows_to_fetch, rows_before, rows_this_time;
+	
+	EXEC SQL END DECLARE SECTION;
+
+	int i;
+	rows_to_fetch = FETCH_SIZE;		// number of rows in each "batch"  
+	rows_before = 0;				   // previous value of sqlerrd[2]   
+	rows_this_time = FETCH_SIZE; 
+
+	if((a = new bill_transactions_t[rows_to_fetch])==NULL)
+	{
+		cout<<" cant allocate memeory for fb_contract_balances fetch"<<endl;
+		exit(0);
+	}
+
+ 
+	EXEC SQL 
+	AT customer_care 
+	DECLARE  c_fb_contract_balances_n CURSOR FOR 
+	SELECT	TRAN_NO,	
+			CONTRACT_ID,
+			TRAN_AMOUNT,
+			CONTRACT_BALANCE,
+			TRAN_DATE,
+			TRAN_TYPE,
+			TRAN_REFERENCE
+	FROM	FB_CONTRACT_BALANCES;
+
+	EXEC SQL AT customer_care  OPEN c_fb_contract_balances_n; 
+	EXEC SQL WHENEVER NOT FOUND CONTINUE; 
+
+	fb_contract_balances		fcb;
+	fb_contract_balances_new	fcbn;
+	
+	bill_key			bk;
+
+	FB_CONTRACT_BALANCES_DEF::iterator i_fcb;
+	
+	while (rows_this_time == rows_to_fetch) 
+	{ 
+		EXEC SQL AT customer_care FOR :rows_to_fetch FETCH c_fb_contract_balances_n INTO :a INDICATOR :a_ind; 		 
+
+		rows_this_time = sqlca.sqlerrd[2] - rows_before; 
+		rows_before = sqlca.sqlerrd[2]; 
+//		printf(" this=%d before=%d \n", rows_this_time, rows_before);
+		printf(" fb_contract_balances =%d \n", rows_before);
+
+		for(i=0; i<rows_this_time; i++)
+		{
+
+			//handling null fetches
+			strcpy(a[i].tran_type,
+				  ((a_ind[i].tran_type_ind < 0) ? "UNDEF":a[i].tran_type));
+			strcpy(a[i].tran_reference,
+				  ((a_ind[i].tran_reference_ind < 0) ? "UNDEF":a[i].tran_reference));
+
+			fcb.init();
+			fcbn.init();
+
+			fcb.tran_amount		= a[i].tran_amount;	
+			fcbn.tran_amount	= a[i].tran_amount;	
+			
+			fcb.tran_no			= a[i].tran_no;
+			fcbn.tran_no		= a[i].tran_no;
+
+			a[i].tran_date[14]	= '\0';
+			fcb.tran_date_rdt.set_date_time(a[i].tran_date); 
+			fcbn.tran_date_rdt.set_date_time(a[i].tran_date); 
+
+			if ( strncmp(a[i].tran_type, "BILL", 4) == 0 )
+			{
+				TRANSACTION_MASTER_DEF::iterator i_tm = bill_period_transaction_master_map.find(a[i].tran_reference);
+
+				if (i_tm == bill_period_transaction_master_map.end() )
+				{
+					//cout << "ERROR :No Bill No in bill_period_transaction_master for " << endl;
+					//cout << "Node Id = " << a[i].contract_id << endl;
+					//cout << "Tran Reference = " << a[i].tran_reference << endl;
+
+					//thushara --> fprintf(log_to_file,"ERROR : Bill No in bill_period_transaction_master for Node Id %d, Tran Reference %d|\n",a[i].contract_id, a[i].tran_reference);
+				}
+				else
+				{
+					fcb.start_date_rdt	= (*i_tm).second->start_date_rdt;
+					fcb.end_date_rdt	= (*i_tm).second->end_date_rdt;
+					fcb.due_date_rdt	= (*i_tm).second->due_date_rdt;
+
+					strcpy(fcb.bill_no, a[i].tran_reference);
+
+					bk.init();
+					bk.node_id		= a[i].contract_id;	
+					bk.end_date_rdt	= (*i_tm).second->end_date_rdt;
+
+					
+					bill_map.insert(BILL_DEF::value_type(bk, fcb));
+				}
+			}
+			else if (( strncmp(a[i].tran_type, "PAY", 3) == 0 ) || ( strncmp(a[i].tran_type, "CRNOTE", 3) == 0 ) || ( strncmp(a[i].tran_type, "SETOFF", 3) == 0 ) || ( strncmp(a[i].tran_type, "DPINVALID", 3) == 0 ) || ( strncmp(a[i].tran_type, "CHARITY", 3) == 0 ) || ( strncmp(a[i].tran_type, "CHQREP", 3) == 0 ) || ( strncmp(a[i].tran_type, "REFUND", 3) == 0 ) )
+			{
+				fb_contract_balances_pay_map.insert(FB_CONTRACT_BALANCES_DEF::value_type(a[i].contract_id, fcbn));
+			}
+			else 
+			{
+				fb_contract_balances_other_pay_map.insert(FB_CONTRACT_BALANCES_DEF::value_type(a[i].contract_id, fcbn));
+			}
+
+			fb_contract_balances_map.insert(FB_CONTRACT_BALANCES_DEF::value_type(a[i].contract_id, fcbn));
+		}
+	}
+	
+	EXEC SQL AT customer_care CLOSE c_fb_contract_balances_n; 
+	delete a;
+	printf("%d  fb_contract_balances data read.\n\n",rows_before);
+}
+
+
+void churn::db_insert_churn_data_summary()
+{
+	EXEC SQL BEGIN DECLARE SECTION;
+	
+	static struct db_churn
+	{
+		int		account_no;				// number	- NN	
+		int		cx_type_id;				// number
+		float	score;					// number(14,4)
+	} *a; 
+	
+	int rows_to_insert;
+	
+	EXEC SQL END DECLARE SECTION;
+	
+	rows_to_insert = bulk_insert_size;
+	
+	if((a = new db_churn[bulk_insert_size])==NULL)
+	{
+		cout<<" cant allocate memory for churn data insert"<<endl;
+		exit(0);
+	}
+
+	for(int j=0; j<insert_iterations; j++)
+	{
+
+		for(int n=0; n<rows_to_insert; n++)
+		{
+			a[n].account_no		= 0;
+			a[n].cx_type_id		= 0;
+			a[n].score			= 0.0;
+		}
+	
+		
+		for(int i=0; i<rows_to_insert; i++, i_db_insert++)
+		{
+			
+
+			a[i].account_no		= (*i_db_insert).second.account_no;
+			a[i].cx_type_id		= (*i_db_insert).second.cx_type_id;
+			a[i].score			= (*i_db_insert).second.average_score;
+		} 
+
+		EXEC SQL  AT customer_care  FOR :rows_to_insert  INSERT INTO CX_PROFILED_CUSTOMERS (
+			account_no,
+			cx_type_id,
+			score
+		) VALUES (:a);
+	
+		EXEC SQL AT customer_care  COMMIT;
+	}
+	
+	delete a;
+}
+
+
+void churn::db_insert_churn_data_remainder_summary()
+{
+	EXEC SQL BEGIN DECLARE SECTION;
+	
+	static struct db_churn
+	{
+		int		account_no;				// number	- NN	
+		int		cx_type_id;				// number
+		float	score;					// number(14,4)
+	} *a;  
+	
+	int rows_to_insert;
+	
+	EXEC SQL END DECLARE SECTION;
+	rows_to_insert = remainder_insert_size;
+	
+	if((a = new db_churn[remainder_insert_size])==NULL)
+	{
+		cout<<" cant allocate memory for churn data insert"<<endl;
+		exit(0);
+	}
+
+	for(int n=0; n<rows_to_insert; n++)
+	{
+		a[n].account_no		= 0;
+		a[n].cx_type_id		= 0;
+		a[n].score			= 0.0;
+	}
+
+
+	for(int i=0; i<rows_to_insert; i++, i_db_insert++)
+	{
+		a[i].account_no		= (*i_db_insert).second.account_no;
+		a[i].cx_type_id		= (*i_db_insert).second.cx_type_id;
+		a[i].score			= (*i_db_insert).second.average_score;
+		
+	} 
+
+
+	EXEC SQL  AT customer_care  FOR :rows_to_insert  INSERT INTO CX_PROFILED_CUSTOMERS (
+			account_no,
+			cx_type_id,
+			score
+	) VALUES (:a);
+
+	EXEC SQL AT customer_care  COMMIT;
+	delete a;
+}
+
+
+/*
+void churn::db_insert_cx_profiled_data(int data_count)
+{
+	EXEC SQL BEGIN DECLARE SECTION;
+
+	static struct db_data
+	{
+		int         account_no;
+		int         cx_type_id;
+		float       average_score;
+		float       total_score;
+		int         no_of_bills;
+		float       tot_pay;
+		float       delay;
+		float       delay_risk;
+		float       gap;
+		float       gap_ratio;
+		float       gap_risk;
+		float       network_stay_days;
+		float       network_stay;
+		float       network_stay_points;
+		float       tot_credit_risk;
+	} * a;
+
+	int rows_to_insert;
+	EXEC SQL END DECLARE SECTION;
+
+	rows_to_insert = data_count;
+	if((a = new db_data[5000])==NULL)
+	{
+		cout<<" cant allocate memory for cx_profiled_data insert"<<endl;
+		exit(0);
+	}
+
+	for(int i=0; i<5000; i++)
+	{
+		a[i].account_no = profiled_data_block[i].account_no;
+		a[i].cx_type_id                  = profiled_data_block[i].cx_type_id;
+		a[i].average_score               = profiled_data_block[i].average_score;
+		a[i].total_score                 = profiled_data_block[i].total_score;
+		a[i].no_of_bills                 = profiled_data_block[i].no_of_bills;
+		a[i].tot_pay                     = profiled_data_block[i].tot_pay;
+		a[i].delay                       = profiled_data_block[i].delay;
+        a[i].delay_risk                  = profiled_data_block[i].gap;
+        a[i].gap                         = profiled_data_block[i].gap_ratio;
+		a[i].gap_ratio                   = profiled_data_block[i].gap_ratio;
+		a[i].gap_risk                    = profiled_data_block[i].gap_risk;
+		a[i].network_stay_days           = profiled_data_block[i].network_stay_days;
+		a[i].network_stay                = profiled_data_block[i].network_stay;
+		a[i].network_stay_points         = profiled_data_block[i].network_stay_points;
+		a[i].tot_credit_risk             = profiled_data_block[i].tot_credit_risk;
+	}
+
+	EXEC SQL  AT customer_care FOR :rows_to_insert INSERT INTO CX_PROFILED_DATA
+        (
+			account_no,
+			cx_type_id,
+			average_score,
+			total_score,
+			no_of_bills,
+			tot_pay,
+			delay,
+			delay_risk,
+			gap,
+			gap_ratio,
+			gap_risk,
+			network_stay_days,
+			network_stay,
+			network_stay_points,
+			tot_credit_risk
+	) 
+	VALUES (:a);
+
+	EXEC SQL AT customer_care COMMIT;
+	delete a;
+}
+*/
+
+
+/*
+
+CREATE TABLE FB_CONTRACT_BALANCES ( 
+  TRAN_NO           NUMBER (16)   NOT NULL, 
+  CONTRACT_ID       NUMBER (10)   NOT NULL, 
+  CONTRACT_BALANCE  NUMBER (14,2) NOT NULL, 
+  TRAN_DATE         DATE          NOT NULL, 
+  TRAN_TYPE         VARCHAR2 (10), 
+  TRAN_REFNO        NUMBER (16), 
+  TRAN_REFERENCE    VARCHAR2 (20), 
+  TRAN_AMOUNT       NUMBER (14,2) NOT NULL, 
+  ENTERED_BY        VARCHAR2 (30), 
+  ENTERED_DATE      DATE, 
+  DESCRIPTION       VARCHAR2 (75))
+
+
+CREATE TABLE BILL_PERIOD_TRANSACTION_MASTER ( 
+  NODE_ID              NUMBER (10)   NOT NULL, 
+  NODE_TYPE            VARCHAR2 (1)  NOT NULL, 
+  BILL_NUMBER          VARCHAR2 (20)  NOT NULL, 
+  START_DATE           DATE, 
+  END_DATE             DATE, 
+  CLOSED_DATE          DATE, 
+  BROUGHT_FWD          NUMBER (14,2), 
+  BILL_AMOUNT          NUMBER (14,2), 
+  PERIOD_PAYMENTS      NUMBER (14,2), 
+  CARRIED_FWD          NUMBER (14,2), 
+  DUE_DATE             DATE, 
+  PERIOD_OVERPAYMENTS  NUMBER (14,2), 
+
+CREATE TABLE CAM_CONTRACT_PACKAGE ( 
+  CONTRACT_PACKAGE_ID          NUMBER (10)   NOT NULL, 
+  CONTRACT_ID                  NUMBER (10), 
+  PACKAGE_ID                   VARCHAR2 (15), 
+  STATUS                       VARCHAR2 (2)  DEFAULT 'NC' NOT NULL, 
+  PENDING_STATUS               VARCHAR2 (2)  DEFAULT 'C', 
+  IS_SUPPLEMENTARY             VARCHAR2 (1)  DEFAULT 'F', 
+  IS_ORIGINAL_ASSIGNMENT       VARCHAR2 (1)  DEFAULT 'T', 
+  AGENT_CODE                   VARCHAR2 (5)  NOT NULL, 
+  BRANCH_CODE                  VARCHAR2 (5)  NOT NULL, 
+  PHONE_MODEL                  VARCHAR2 (20), 
+  PURCHASE_TYPE                VARCHAR2 (5), 
+  AUTO_DISCONNECT_DATE         DATE, 
+  ORIGINAL_PACKAGE_START_DATE  DATE          DEFAULT SYSDATE, 
+  START_DATE                   DATE          DEFAULT sysdate NOT NULL, 
+  END_DATE                     DATE, 
+  CREATED_USER                 VARCHAR2 (30)  DEFAULT USER, 
+  UPDATED_USER                 VARCHAR2 (30), 
+  RENTAL_ACTIVATION_DATE       DATE, 
+  APP_VERIFIED_USER            VARCHAR2 (20), 
+  RENTAL_PAYEE                 NUMBER (10), 
+  LAST_PACKAGE_CHANGE_DATE     DATE, 
+  APPLICATION_RECEIVED         VARCHAR2 (1), 
+  DEALER_REG_TYPE              VARCHAR2 (15), 
+  IS_VERIFIED                  VARCHAR2 (1), 
+  VERIFIED_DATE                DATE, 
+  BILL_RUN_CODE                VARCHAR2 (10)  NOT NULL, 
+  PART_KEY                     VARCHAR2 (10)  NOT NULL, 
+  BP_SALES_CODE                VARCHAR2 (10), 
+
+  */
